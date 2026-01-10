@@ -184,7 +184,6 @@ class VllmFp8LinearMethod(vllm_fp8.Fp8LinearMethod,
 
                 weights.append(weight_slice)
                 weight_scales.append(weight_scale_slice)
-                print(weight_slice.shape, weight_scale_slice.shape)  # ADD THIS
 
                 start = end
 
