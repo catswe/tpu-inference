@@ -231,7 +231,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
 def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
-            if isinstance(module, module_type):
+            if type(module) is module_type:
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break
