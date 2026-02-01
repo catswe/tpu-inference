@@ -209,17 +209,9 @@ def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
 def _shard_rotary_embedding(layer: RotaryEmbeddingBase, mesh: Mesh) -> None:
     """Ensure rotary embedding cos_sin_cache is on TPU before JIT."""
     if hasattr(layer, 'cos_sin_cache') and layer.cos_sin_cache is not None:
-        cache = layer.cos_sin_cache
-        # Check if it needs to be moved (either not torchax, or torchax but on CPU)
-        if _tensor_is_in_cpu(cache):
-            if isinstance(cache, torchax.tensor.Tensor):
-                # It's a torchax tensor on CPU, get the underlying jax array
-                cache = cache._elem
-            else:
-                cache = cache.contiguous()
-            sharding = NamedSharding(mesh, P())
-            converted = _convert_to_torchax_and_shard(cache, sharding)
-            layer.cos_sin_cache = converted
+        if _tensor_is_in_cpu(layer.cos_sin_cache):
+            layer.cos_sin_cache = _shard_tensor_to_tpu_replicated(
+                layer.cos_sin_cache, mesh)
 
 
 # NOTE: Ordering is important as it calls first matched type of a given module
