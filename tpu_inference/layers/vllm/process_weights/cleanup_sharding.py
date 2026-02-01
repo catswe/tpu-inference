@@ -86,17 +86,11 @@ def update_lora(model: torch.nn.Module,
 
 def _extract_all_params_buffers(model: torch.nn.Module):
     params = dict(model.named_parameters())
-    buffers = dict(model.named_buffers())
-
-    # Filter out cos_sin_cache to force it to be captured as a constant
-    # instead of being passed as a dynamic JIT argument.
-    # This avoids RecursionError in jax.jit dispatch for this specific tensor shape.
-    filtered_buffers = {
+    cpu_buffers = {
         k: v
-        for k, v in buffers.items() if "cos_sin_cache" not in k
+        for k, v in model.named_buffers() if _tensor_is_in_cpu(v)
     }
-
-    return params, filtered_buffers
+    return params, cpu_buffers
 
 
 def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
