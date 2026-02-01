@@ -28,6 +28,8 @@ from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA)
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
+from vllm.model_executor.layers.rotary_embedding.base import \
+    RotaryEmbeddingBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 
@@ -83,7 +85,18 @@ def update_lora(model: torch.nn.Module,
 
 
 def _extract_all_params_buffers(model: torch.nn.Module):
-    return dict(model.named_parameters()), dict(model.named_buffers())
+    params = dict(model.named_parameters())
+    buffers = dict(model.named_buffers())
+
+    # Filter out cos_sin_cache to force it to be captured as a constant
+    # instead of being passed as a dynamic JIT argument.
+    # This avoids RecursionError in jax.jit dispatch for this specific tensor shape.
+    filtered_buffers = {
+        k: v
+        for k, v in buffers.items() if "cos_sin_cache" not in k
+    }
+
+    return params, filtered_buffers
 
 
 def _tensor_is_in_cpu(tensor: torch.tensor) -> bool:
@@ -193,11 +206,28 @@ def _shard_row_parallel_linear_lora(layer: RowParallelLinearWithLoRA,
     _shard_base_linear_lora_replicated(layer, mesh)
 
 
+def _shard_rotary_embedding(layer: RotaryEmbeddingBase, mesh: Mesh) -> None:
+    """Ensure rotary embedding cos_sin_cache is on TPU before JIT."""
+    if hasattr(layer, 'cos_sin_cache') and layer.cos_sin_cache is not None:
+        cache = layer.cos_sin_cache
+        # Check if it needs to be moved (either not torchax, or torchax but on CPU)
+        if _tensor_is_in_cpu(cache):
+            if isinstance(cache, torchax.tensor.Tensor):
+                # It's a torchax tensor on CPU, get the underlying jax array
+                cache = cache._elem
+            else:
+                cache = cache.contiguous()
+            sharding = NamedSharding(mesh, P())
+            converted = _convert_to_torchax_and_shard(cache, sharding)
+            layer.cos_sin_cache = converted
+
+
 # NOTE: Ordering is important as it calls first matched type of a given module
 MODULE_TYPE_TO_SHARDING_FUNC = [
     # Shard embedding layers
     (ParallelLMHead, _shard_lm_head),
     (VocabParallelEmbedding, _shard_vocab_parallel_embedding),
+    (RotaryEmbeddingBase, _shard_rotary_embedding),
     # Shard LoRA layers
     (ColumnParallelLinearWithLoRA, _shard_column_linear_lora),
     (QKVParallelLinearWithLoRA, _shard_qkv_linear_lora),
@@ -212,7 +242,7 @@ MODULE_TYPE_TO_SHARDING_FUNC = [
 def _shard_module_to_tpu(model: torch.nn.Module, mesh: Mesh) -> None:
     for path, module in model.named_modules():
         for module_type, sharding_func in MODULE_TYPE_TO_SHARDING_FUNC:
-            if type(module) is module_type:
+            if isinstance(module, module_type):
                 logger.debug("shard %s with %s", path, sharding_func)
                 sharding_func(module, mesh)
                 break

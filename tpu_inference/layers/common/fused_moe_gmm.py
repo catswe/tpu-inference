@@ -417,6 +417,16 @@ def fused_moe_func(
                      None), P(ShardingAxisName.MLP_DATA),
                    P(ShardingAxisName.MLP_DATA)))(hidden_states, topk_indices)
 
+    m_dim = x.shape[0]
+    pad_len = (128 - (m_dim % 128)) % 128
+    if pad_len > 0:
+        x = jnp.pad(x, ((0, pad_len), (0, 0)))
+        # Add padding count to the last expert of the last shard
+        if group_sizes.ndim == 2:
+            group_sizes = group_sizes.at[-1, -1].add(pad_len)
+        else:
+            group_sizes = group_sizes.at[-1].add(pad_len)
+
     x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
 
     if use_ep:

@@ -250,19 +250,47 @@ def _jax_attn_func(
 ) -> Tuple[jax.Array, jax.Array]:
     del scale  # Unused for now, as the attention function applies a default scale.
 
-    # Get shapes from vllm
-    q_len, q_compute_dim = q.shape
-    k_len, k_compute_dim = k.shape
-    assert k.shape == v.shape
-    assert q_compute_dim == head_size * num_heads
-    assert k_compute_dim == head_size * num_kv_heads
+    print("DEBUG _jax_attn_func input shapes:")
+    print(f"q.shape={q.shape}, q.ndim={q.ndim}")
+    print(f"k.shape={k.shape}, k.ndim={k.ndim}")
+    print(f"v.shape={v.shape}, v.ndim={v.ndim}")
+    print(
+        f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, head_size={head_size}"
+    )
 
-    # Convert the shapes from vLLM's convetion to what the attention function expects
-    # bs, num_heads, q_len, head_size
-    q = q.reshape(q_len, num_heads, head_size)
-    # bs, num_kv_heads, k_len, head_size
-    k = k.reshape(k_len, num_kv_heads, head_size)
-    v = v.reshape(k_len, num_kv_heads, head_size)
+    # Static dimensions (these are already concrete since they're static_argnames)
+    n_h = num_heads
+    n_kv_h = num_kv_heads
+    h_s = head_size
+    q_compute_dim = n_h * h_s
+
+    # Handle both 2D [seq_len, num_heads * head_size] and 3D [seq_len, num_heads, head_size] formats
+    # DeepSeek V2/V3 with MLA disabled may pass 3D tensors directly
+    if q.ndim == 2:
+        q_len = q.shape[0]
+        q = q.reshape(q_len, n_h, h_s)
+    elif q.ndim == 3:
+        q_len = q.shape[0]
+        # Validate shape matches expected dimensions
+        # Note: q may have different head_dim than h_s for DeepSeek (qk_head_dim vs padded)
+    else:
+        raise ValueError(f"Unexpected q.ndim={q.ndim}, expected 2 or 3")
+
+    if k.ndim == 2:
+        k_len = k.shape[0]
+        k = k.reshape(k_len, n_kv_h, h_s)
+    elif k.ndim == 3:
+        k_len = k.shape[0]
+    else:
+        raise ValueError(f"Unexpected k.ndim={k.ndim}, expected 2 or 3")
+
+    if v.ndim == 2:
+        v_len = v.shape[0]
+        v = v.reshape(v_len, n_kv_h, h_s)
+    elif v.ndim == 3:
+        v_len = v.shape[0]
+    else:
+        raise ValueError(f"Unexpected v.ndim={v.ndim}, expected 2 or 3")
 
     new_kv_cache, outputs = attention(
         kv_cache,
@@ -279,9 +307,6 @@ def _jax_attn_func(
     )
 
     # Convert the shape back to vLLM's convention
-    assert outputs.shape[0] == q_len
-    assert outputs.shape[1] == num_heads
-    assert outputs.shape[2] == head_size
     outputs = outputs.reshape(q_len, q_compute_dim)
 
     return new_kv_cache, outputs
