@@ -266,24 +266,20 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
 
 class VllmAWQMoEMethod(FusedMoEMethodBase):
-    """AWQ quantized FusedMoE method for TPU.
-
-    Dequantizes AWQ-packed uint4 MoE weights into bfloat16, then
-    re-quantizes to fp8 for compact storage. Uses the standard TPU
-    fused MoE kernels for inference.
-    """
 
     def __init__(
         self,
         quant_config: VllmAWQConfig,
-        layer: FusedMoE,
+        layer: torch.nn.Module,
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
+
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
+
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
