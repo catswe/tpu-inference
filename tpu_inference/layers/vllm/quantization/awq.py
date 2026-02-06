@@ -38,17 +38,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
 from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.fused_moe import (FusedMoEBackend,
-                                                 fused_moe_apply,
-                                                 select_moe_backend)
-from tpu_inference.layers.vllm.process_weights.fused_moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+from tpu_inference.layers.vllm.moe import (
+    MoEBackend, moe_apply, select_moe_backend_from_fused_moe_config)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -277,9 +276,9 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
         self.mesh = mesh
-        self.moe_backend = select_moe_backend(self.moe)
+        self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
         self.extra_backend_kwargs = {}
-        if self.moe_backend == FusedMoEBackend.FUSED_MOE:
+        if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
 
     @property
@@ -492,7 +491,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         x_jax = jax_view(x).astype(jnp.bfloat16)
         router_jax = jax_view(router_logits).astype(jnp.bfloat16)
         return torch_view(
-            fused_moe_apply(
+            moe_apply(
                 layer,
                 x_jax,
                 router_jax,
