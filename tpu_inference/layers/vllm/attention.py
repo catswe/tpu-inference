@@ -182,16 +182,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         mesh = vllm_model_wrapper_context.mesh
 
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
-        # Ensure k/v dtype matches the KV cache dtype. AWQ dequantization
-        # can produce float32 tensors on JAX/TPU even when the model dtype
-        # is float16, causing a mismatch with the float16 KV cache.
-        kv_dtype = kv_cache.dtype
-        if key.dtype != kv_dtype:
-            key = key.astype(kv_dtype)
-        if value.dtype != kv_dtype:
-            value = value.astype(kv_dtype)
-        if query.dtype != kv_dtype:
-            query = query.astype(kv_dtype)
 
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
