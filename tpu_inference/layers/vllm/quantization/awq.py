@@ -288,10 +288,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return True
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
-        # Weights are dequantized then re-quantized to fp8 at load time.
-        # Inference uses fp8 weights + scales, no additional quant config
-        # is needed beyond what's stored in the weight/scale tensors.
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> None:
         return None
 
     def create_weights(
