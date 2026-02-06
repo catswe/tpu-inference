@@ -182,7 +182,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         mesh = vllm_model_wrapper_context.mesh
 
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
-
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
             key, value = quantize_kv(self.kv_cache_quantized_dtype, key, value,
