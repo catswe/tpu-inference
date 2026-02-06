@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,6 +56,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
+
 logger = init_logger(__name__)
 
 
@@ -163,6 +164,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             weight = awq_u32_unpack_u4(weight)
             group_size = self.quant_config.group_size
             weight = weight.reshape((-1, group_size, weight.shape[-1]))
+
             zero_point = awq_u32_unpack_u4(zero_point)
             return process_linear_weights(
                 LinearWeights(
@@ -179,7 +181,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
         weights = process_awq_linear_weights(weight, weight_scale, zero_point,
                                              bias)
-
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -206,11 +207,13 @@ class VllmAWQLinearMethod(AWQLinearMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
         with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
             else:
                 out = self._apply_split(layer, x, bias)
+
         return out
 
     def _apply_fused(self,
@@ -218,14 +221,17 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         x_jax = jax_view(x)
+
         qweight = jax_view(layer.qweight)
         qzeros = jnp.expand_dims(jax_view(layer.qzeros), 1)
         scales = jnp.expand_dims(jax_view(layer.scales), 1)
+
         qweight = qweight.astype(jnp.int8)
         qzeros = qzeros.astype(jnp.int8)
         weight = (qweight - qzeros) * scales
         weight = weight.reshape((-1, weight.shape[-1]))
         outs = jnp.einsum("bd,df->bf", x_jax, weight)
+
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
         outs = slice_sharded_tensor_for_concatenation(
@@ -238,6 +244,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert isinstance(layer.qweight, torch.nn.ParameterList)
+
         x_jax = jax_view(x)
         params = zip(layer.qweight, layer.qzeros, layer.scales)
         outs = []
@@ -245,13 +252,16 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             qweight = jax_view(qweight)
             scales = jnp.expand_dims(jax_view(scales), 1)
             qzeros = jnp.expand_dims(jax_view(qzeros), 1)
+
             qweight = qweight.astype(jnp.int8)
             qzeros = qzeros.astype(jnp.int8)
             weight = (qweight - qzeros) * scales
             weight = weight.reshape((-1, weight.shape[-1]))
             out = jnp.einsum("bd,df->bf", x_jax, weight)
+
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
+
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
