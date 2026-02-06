@@ -166,6 +166,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             weight = weight.reshape((-1, group_size, weight.shape[-1]))
 
             zero_point = awq_u32_unpack_u4(zero_point)
+
             return process_linear_weights(
                 LinearWeights(
                     weight=weight,
@@ -228,12 +229,14 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
         qweight = qweight.astype(jnp.int8)
         qzeros = qzeros.astype(jnp.int8)
+
         weight = (qweight - qzeros) * scales
         weight = weight.reshape((-1, weight.shape[-1]))
         outs = jnp.einsum("bd,df->bf", x_jax, weight)
 
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
+
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
@@ -255,6 +258,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
             qweight = qweight.astype(jnp.int8)
             qzeros = qzeros.astype(jnp.int8)
+
             weight = (qweight - qzeros) * scales
             weight = weight.reshape((-1, weight.shape[-1]))
             out = jnp.einsum("bd,df->bf", x_jax, weight)
