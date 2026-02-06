@@ -19,7 +19,6 @@ from jax.sharding import Mesh
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
 from tpu_inference.layers.common import quant_methods
 from tpu_inference.layers.vllm.quantization.awq import VllmAWQConfig
@@ -53,6 +52,5 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
 
     model_config.quantization = quant_methods.get_tpu_quant_method(
         quant_config.get_name())
-    quant_cfg = get_quant_config(model_config, vllm_config.load_config)
-    quant_cfg.maybe_update_config(model_config.model)
-    return quant_cfg
+    return VllmConfig.get_quantization_config(model_config,
+                                              vllm_config.load_config)
