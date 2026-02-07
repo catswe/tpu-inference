@@ -182,8 +182,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         mesh = vllm_model_wrapper_context.mesh
 
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
-        # NOTE(catswe): RPA kernel compile failure due to "Invalid vector register
-        # cast" bitcast error with fp16. Converts to bfloat16 as a workaround.
+        # NOTE(catswe): RPA kernel compile failure with fp16 bitcast error
+        # "Invalid vector register cast". Converts to bfloat16 as a workaround.
         if query.dtype == jnp.float16:
             query = query.astype(jnp.bfloat16)
 
