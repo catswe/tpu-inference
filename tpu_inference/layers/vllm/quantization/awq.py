@@ -91,7 +91,8 @@ def _awq_dequantize_moe_weight(
     s = jnp.expand_dims(scales, 2)
 
     # Dequantize: (weight - zero_point) * scale
-    w = ((w.astype(jnp.int8) - z.astype(jnp.int8)) * s).astype(jnp.bfloat16)
+    w = ((w.astype(jnp.float32) - z.astype(jnp.float32)) *
+         s.astype(jnp.float32)).astype(jnp.bfloat16)
 
     # Collapse groups back: (E, K, N)
     w = w.reshape(w.shape[0], -1, w.shape[-1])
