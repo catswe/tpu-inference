@@ -47,7 +47,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.moe import (
-    MoEBackend, moe_apply, select_moe_backend_from_fused_moe_config)
+    MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import \
@@ -487,16 +487,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_weight_scale=jax_view(layer.w2_weight_scale_inv),
             w2_bias=None,
         )
-        # Cast to bfloat16 — GMM kernels don't support float16
-        x_jax = jax_view(x).astype(jnp.bfloat16)
-        router_jax = jax_view(router_logits).astype(jnp.bfloat16)
-        return torch_view(
-            moe_apply(
-                layer,
-                x_jax,
-                router_jax,
-                weights,
-                self.moe_backend,
-                self.mesh,
-                self.extra_backend_kwargs,
-            ))
+
+        return vllm_moe_apply(
+            layer=layer,
+            weights=weights,
+            quant_method_instance=self,
+            x=x,
+            router_logits=router_logits,
+        )
