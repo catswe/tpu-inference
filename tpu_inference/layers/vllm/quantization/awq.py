@@ -307,18 +307,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             FusedMoeWeightScaleSupported.GROUP.value,
         })
 
-        pack_factor = self.quant_config.pack_factor
-        group_size = self.quant_config.group_size
-        num_groups_w13 = hidden_size // group_size
-        num_groups_w2 = intermediate_size_per_partition // group_size
-
-        # w13: gate_up_proj (column parallel), packed qweight
-        # Shape: (num_experts, hidden_size, 2 * intermediate_size // pack_factor)
         w13_qweight = Parameter(
             torch.empty(
                 num_experts,
                 hidden_size,
-                2 * intermediate_size_per_partition // pack_factor,
+                2 * intermediate_size_per_partition //
+                self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -326,13 +320,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
-        # w2: down_proj (row parallel), packed qweight
-        # Shape: (num_experts, intermediate_size, hidden_size // pack_factor)
         w2_qweight = Parameter(
             torch.empty(
                 num_experts,
                 intermediate_size_per_partition,
-                hidden_size // pack_factor,
+                hidden_size // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -340,12 +332,16 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
-        # Scales
+        num_groups_w13 = hidden_size // self.quant_config.group_size
+        num_groups_w2 = intermediate_size_per_partition // self.quant_config.group_size
+
+        # WEIGHT_SCALES
+        # Allocate 2 scales for w1 and w3 respectively.
         w13_scales = Parameter(
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition,
+                intermediate_size_per_partition * 2,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -354,23 +350,23 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
         w2_scales = Parameter(
-            torch.empty(
-                num_experts,
-                num_groups_w2,
-                hidden_size,
-                dtype=params_dtype,
-            ),
+            torch.empty(num_experts,
+                        num_groups_w2,
+                        hidden_size,
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
 
-        # Zero points (packed)
+        # WEIGHT_ZERO_POINT
+        # Allocate 2 zero points for w1 and w3 respectively.
         w13_qzeros = Parameter(
             torch.empty(
                 num_experts,
                 num_groups_w13,
-                2 * intermediate_size_per_partition // pack_factor,
+                2 * intermediate_size_per_partition //
+                self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -382,7 +378,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             torch.empty(
                 num_experts,
                 num_groups_w2,
-                hidden_size // pack_factor,
+                hidden_size // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
             requires_grad=False,
@@ -392,44 +388,47 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
+
         assert not self.moe.has_bias
 
-        # Read and immediately delete old AWQ parameters to free CPU memory
-        # before the jitted dequant+requant runs on device.
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
         delattr(layer, "w13_qweight")
-        w13_scales = t2j(layer.w13_scales, use_dlpack=False)
-        delattr(layer, "w13_scales")
-        w13_qzeros = t2j(layer.w13_qzeros, use_dlpack=False)
-        delattr(layer, "w13_qzeros")
+
         w2_qweight = t2j(layer.w2_qweight, use_dlpack=False)
         delattr(layer, "w2_qweight")
+
+        w13_scales = t2j(layer.w13_scales, use_dlpack=False)
+        delattr(layer, "w13_scales")
+
         w2_scales = t2j(layer.w2_scales, use_dlpack=False)
         delattr(layer, "w2_scales")
+
+        w13_qzeros = t2j(layer.w13_qzeros, use_dlpack=False)
+        delattr(layer, "w13_qzeros")
+
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
         delattr(layer, "w2_qzeros")
 
-        group_size = self.quant_config.group_size
-        moe_backend = self.moe_backend
-        w13_interleave = layer.activation == "swigluoai"
-        w13_reorder_size = get_mesh_shape_product(self.mesh,
-                                                  ShardingAxisName.MLP_TENSOR)
-
         @jax.jit
         def process_awq_moe_weights(
-            w13_qw: jax.Array,
-            w13_sc: jax.Array,
-            w13_qz: jax.Array,
-            w2_qw: jax.Array,
-            w2_sc: jax.Array,
-            w2_qz: jax.Array,
+            w13_qweight: jax.Array,
+            w13_scales: jax.Array,
+            w13_qzeros: jax.Array,
+            w2_qweight: jax.Array,
+            w2_scales: jax.Array,
+            w2_qzeros: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize AWQ int4 → bf16
             # Result shapes: (E, 2*inter, hidden) and (E, hidden, inter)
-            w13_weight = _awq_dequantize_moe_weight(w13_qw, w13_sc, w13_qz,
-                                                    group_size)
-            w2_weight = _awq_dequantize_moe_weight(w2_qw, w2_sc, w2_qz,
-                                                   group_size)
+            w13_weight = _awq_dequantize_moe_weight(
+                w13_qweight, w13_scales, w13_qzeros,
+                self.quant_config.group_size)
+            w2_weight = _awq_dequantize_moe_weight(
+                w2_qweight, w2_scales, w2_qzeros, self.quant_config.group_size)
+
+            w13_interleave = layer.activation == "swigluoai"
+            w13_reorder_size = get_mesh_shape_product(
+                self.mesh, ShardingAxisName.MLP_TENSOR)
 
             # Re-quantize bf16 → fp8 for compact storage, matching the
             # pattern used by VllmFp8MoEMethod.
@@ -443,12 +442,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                     w2_bias=None,
                 ),
                 jnp.float8_e4m3fn,
-                None,  # block_size=None → per-channel quantization
+                None,
             )
 
             return process_moe_weights(
                 weights,
-                moe_backend=moe_backend,
+                moe_backend=self.moe_backend,
                 w13_reorder_size=w13_reorder_size,
                 w13_interleave=w13_interleave,
             )
