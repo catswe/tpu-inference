@@ -182,10 +182,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         mesh = vllm_model_wrapper_context.mesh
 
         query, key, value = jax_view(query), jax_view(key), jax_view(value)
+        # NOTE(catswe): RPA kernel fails to compile due to "Invalid vector
+        # register cast" error with fp16. Convert to bf16 as a workaround
+        if query.dtype == jnp.float16:
+            query = query.astype(jnp.bfloat16)
+
         q_scale = k_scale = v_scale = None
         if self.kv_cache_quantized_dtype:
-            if query.dtype == jnp.float16:
-                query = query.astype(jnp.bfloat16)
             key, value = quantize_kv(self.kv_cache_quantized_dtype, key, value,
                                      layer._k_scale_float,
                                      layer._v_scale_float)
