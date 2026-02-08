@@ -42,9 +42,8 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
-from tpu_inference.layers.common.quantization import (awq_u32_unpack_u4,
-                                                      dequantize_awq_moe_weight
-                                                      )
+from tpu_inference.layers.common.quantization import (
+    awq_u32_unpack_u4, dequantize_tensor_from_awq_packed)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -381,13 +380,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros: jax.Array,
         ) -> FusedMoEWeights:
             # Dequantize AWQ int4 to fp32
-            w13_weight = dequantize_awq_moe_weight(
+            w13_weight = dequantize_tensor_from_awq_packed(
                 w13_qweight, w13_scales, w13_qzeros,
                 self.quant_config.group_size, jnp.float32)
-            w2_weight = dequantize_awq_moe_weight(w2_qweight, w2_scales,
-                                                  w2_qzeros,
-                                                  self.quant_config.group_size,
-                                                  jnp.float32)
+            w2_weight = dequantize_tensor_from_awq_packed(
+                w2_qweight, w2_scales, w2_qzeros, self.quant_config.group_size,
+                jnp.float32)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(

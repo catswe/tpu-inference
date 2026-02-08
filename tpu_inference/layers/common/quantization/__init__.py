@@ -177,7 +177,7 @@ def dequantize_tensor_from_mxfp4_packed(
     )
 
 
-def dequantize_awq_moe_weight(
+def dequantize_tensor_from_awq_packed(
     weight_q: jax.Array,
     scale: jax.Array,
     zero_point_q: jax.Array,
