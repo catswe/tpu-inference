@@ -36,7 +36,6 @@ repos:
   rev: 6.0.1
   hooks:
   - id: isort
-    args: ["--profile", "google"]
 - repo: https://github.com/google/yapf
   rev: v0.43.0
   hooks:
