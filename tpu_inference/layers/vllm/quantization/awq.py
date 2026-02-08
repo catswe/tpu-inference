@@ -379,7 +379,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_scales: jax.Array,
             w2_qzeros: jax.Array,
         ) -> FusedMoEWeights:
-            # Dequantize AWQ int4 to fp32
+            # Dequantize awq int4 weights to fp32
             w13_weight = dequantize_tensor_from_awq_packed(
                 w13_qweight, w13_scales, w13_qzeros,
                 self.quant_config.group_size, jnp.float32)

@@ -184,18 +184,17 @@ def dequantize_tensor_from_awq_packed(
     group_size: int,
     out_dtype: jnp.dtype = jnp.bfloat16,
 ) -> jax.Array:
-    """Dequantize a single AWQ-packed MoE weight tensor.
+    """Dequantize packed awq weight tensor.
 
     Args:
-        qweight: Packed uint4-in-uint32 weight, shape (E, K, N//pack_factor).
-        scales: Per-group scales, shape (E, K//group_size, N).
-        qzeros: Packed uint4-in-uint32 zeros, shape (E, K//group_size, N//pack_factor).
+        qweight: uint4 tensor packed into uint32.
+        scale: Quantization scale.
+        qzeros: uint4 tensor packed into uint32.
         group_size: Number of elements per quantization group.
-        out_dtype: Output dtype.
+        out_dtype: Dtype of the output.
 
     Returns:
-        Dequantized bf16 weight, shape (E, N, K) — transposed to
-        (num_experts, out_features, in_features) for MoE convention.
+        Dequantized tensor_q.
     """
     tensor_q = awq_u32_unpack_u4(tensor_q)
     zero_point = awq_u32_unpack_u4(zero_point)
