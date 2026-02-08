@@ -16,89 +16,51 @@ from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec
 import torch
-from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view, torch_view
+from torchax.interop import jax_view
+from torchax.interop import torch_view
 from torchax.ops.mappings import t2j
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
-from vllm.model_executor.layers.fused_moe.layer import \
-    FusedMoeWeightScaleSupported
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config
-from vllm.model_executor.layers.quantization.awq import (AWQConfig,
-                                                         AWQLinearMethod)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizeMethodBase
-from vllm.model_executor.layers.quantization.utils.quant_utils import \
-    is_layer_skipped
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import set_weight_attrs
+from vllm.model_executor.layers.quantization import register_quantization_config
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
-from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights,
-    to_parameter_list)
-from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
-from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
+from tpu_inference.layers.common.process_weights.linear_weights import LinearWeights
+from tpu_inference.layers.common.process_weights.linear_weights import process_linear_weights
+from tpu_inference.layers.common.process_weights.linear_weights import shard_linear_weights
+from tpu_inference.layers.common.process_weights.linear_weights import to_parameter_list
+from tpu_inference.layers.common.process_weights.moe_weights import FusedMoEWeights
+from tpu_inference.layers.common.process_weights.moe_weights import process_moe_weights
+from tpu_inference.layers.common.process_weights.moe_weights import quantize_moe_weights
+from tpu_inference.layers.common.process_weights.moe_weights import shard_moe_weights
+from tpu_inference.layers.common.quant_methods import AWQ
+from tpu_inference.layers.common.quant_methods import get_tpu_quant_method
 from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
+from tpu_inference.layers.common.quantization import dequantize_awq_moe_weight
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import \
-    slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.moe import (
-    MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
-from tpu_inference.layers.vllm.quantization.configs import (
-    VllmQuantConfig, VllmQuantLinearConfig)
-from tpu_inference.layers.vllm.quantization.unquantized import \
-    VllmUnquantizedLinearMethod
+from tpu_inference.layers.common.utils import slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.vllm.moe import MoEBackend
+from tpu_inference.layers.vllm.moe import select_moe_backend_from_fused_moe_config
+from tpu_inference.layers.vllm.moe import vllm_moe_apply
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
+from tpu_inference.layers.vllm.quantization.configs import VllmQuantLinearConfig
+from tpu_inference.layers.vllm.quantization.unquantized import VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-def _awq_dequantize_moe_weight(
-    qweight: jax.Array,
-    scales: jax.Array,
-    qzeros: jax.Array,
-    group_size: int,
-) -> jax.Array:
-    """Dequantize a single AWQ-packed MoE weight tensor.
-
-    Args:
-        qweight: Packed uint4-in-uint32 weight, shape (E, K, N//pack_factor).
-        scales: Per-group scales, shape (E, K//group_size, N).
-        qzeros: Packed uint4-in-uint32 zeros, shape (E, K//group_size, N//pack_factor).
-        group_size: Number of elements per quantization group.
-
-    Returns:
-        Dequantized bf16 weight, shape (E, N, K) — transposed to
-        (num_experts, out_features, in_features) for MoE convention.
-    """
-    # Unpack uint4 from AWQ uint32 packing along the last dim
-    # qweight: (E, K, N//8) -> (E, K, N)
-    w = awq_u32_unpack_u4(qweight)
-    # qzeros: (E, groups, N//8) -> (E, groups, N)
-    z = awq_u32_unpack_u4(qzeros)
-
-    # Reshape weight into groups: (E, groups, group_size, N)
-    w = w.reshape(w.shape[0], -1, group_size, w.shape[-1])
-    # Broadcast scales and zeros: (E, groups, 1, N)
-    z = jnp.expand_dims(z, 2)
-    s = jnp.expand_dims(scales, 2)
-
-    # Dequantize: (weight - zero_point) * scale
-    w = ((w.astype(jnp.float32) - z.astype(jnp.float32)) *
-         s.astype(jnp.float32)).astype(jnp.bfloat16)
-
-    # Collapse groups back: (E, K, N)
-    w = w.reshape(w.shape[0], -1, w.shape[-1])
-
-    # Transpose to MoE convention: (E, N, K)
-    return jnp.swapaxes(w, 1, 2)
 
 
 @register_quantization_config(get_tpu_quant_method(AWQ))
@@ -419,20 +381,19 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_scales: jax.Array,
             w2_qzeros: jax.Array,
         ) -> FusedMoEWeights:
-            # Dequantize AWQ int4 → bf16
-            # Result shapes: (E, 2*inter, hidden) and (E, hidden, inter)
-            w13_weight = _awq_dequantize_moe_weight(
+            # Dequantize AWQ int4 to fp32
+            w13_weight = dequantize_awq_moe_weight(
                 w13_qweight, w13_scales, w13_qzeros,
-                self.quant_config.group_size)
-            w2_weight = _awq_dequantize_moe_weight(
-                w2_qweight, w2_scales, w2_qzeros, self.quant_config.group_size)
+                self.quant_config.group_size, jnp.float32)
+            w2_weight = dequantize_awq_moe_weight(w2_qweight, w2_scales,
+                                                  w2_qzeros,
+                                                  self.quant_config.group_size,
+                                                  jnp.float32)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            # Re-quantize bf16 → fp8 for compact storage, matching the
-            # pattern used by VllmFp8MoEMethod.
             weights = quantize_moe_weights(
                 FusedMoEWeights(
                     w13_weight=w13_weight,

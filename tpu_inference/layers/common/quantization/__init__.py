@@ -177,6 +177,45 @@ def dequantize_tensor_from_mxfp4_packed(
     )
 
 
+def dequantize_awq_moe_weight(
+    weight_q: jax.Array,
+    scale: jax.Array,
+    zero_point_q: jax.Array,
+    group_size: int,
+    out_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+    """Dequantize a single AWQ-packed MoE weight tensor.
+
+    Args:
+        qweight: Packed uint4-in-uint32 weight, shape (E, K, N//pack_factor).
+        scales: Per-group scales, shape (E, K//group_size, N).
+        qzeros: Packed uint4-in-uint32 zeros, shape (E, K//group_size, N//pack_factor).
+        group_size: Number of elements per quantization group.
+        out_dtype: Output dtype.
+
+    Returns:
+        Dequantized bf16 weight, shape (E, N, K) — transposed to
+        (num_experts, out_features, in_features) for MoE convention.
+    """
+    weight_q_unpacked = awq_u32_unpack_u4(weight_q)
+    zero_point_q_unpacked = awq_u32_unpack_u4(zero_point_q)
+
+    weight_q_unpacked = weight_q_unpacked.reshape(weight_q_unpacked.shape[0],
+                                                  -1, group_size,
+                                                  weight_q_unpacked.shape[-1])
+    zero_point_q_unpacked = jnp.expand_dims(zero_point_q_unpacked, 2)
+    scale = jnp.expand_dims(scale, 2)
+
+    weight_q_unpacked = ((weight_q_unpacked.astype(jnp.float32) -
+                          zero_point_q_unpacked.astype(jnp.float32)) *
+                         scale.astype(jnp.float32)).astype(out_dtype)
+
+    weight_q_unpacked = weight_q_unpacked.reshape(weight_q_unpacked.shape[0],
+                                                  -1,
+                                                  weight_q_unpacked.shape[-1])
+    return jnp.swapaxes(weight_q_unpacked, 1, 2)
+
+
 def quantize_tensor(
     dtype: jnp.dtype,
     tensor: jax.Array,
