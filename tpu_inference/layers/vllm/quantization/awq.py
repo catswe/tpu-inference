@@ -16,45 +16,44 @@ from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec
 import torch
+from jax.sharding import Mesh, PartitionSpec
 from torch.nn.parameter import Parameter
-from torchax.interop import jax_view
-from torchax.interop import torch_view
+from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
-from vllm.model_executor.layers.fused_moe.layer import FusedMoeWeightScaleSupported
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.linear import LinearMethodBase
-from vllm.model_executor.layers.linear import set_weight_attrs
-from vllm.model_executor.layers.quantization import register_quantization_config
-from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import \
+    FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.quantization import \
+    register_quantization_config
+from vllm.model_executor.layers.quantization.awq import (AWQConfig,
+                                                         AWQLinearMethod)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
+from vllm.model_executor.layers.quantization.utils.quant_utils import \
+    is_layer_skipped
 
-from tpu_inference.layers.common.process_weights.linear_weights import LinearWeights
-from tpu_inference.layers.common.process_weights.linear_weights import process_linear_weights
-from tpu_inference.layers.common.process_weights.linear_weights import shard_linear_weights
-from tpu_inference.layers.common.process_weights.linear_weights import to_parameter_list
-from tpu_inference.layers.common.process_weights.moe_weights import FusedMoEWeights
-from tpu_inference.layers.common.process_weights.moe_weights import process_moe_weights
-from tpu_inference.layers.common.process_weights.moe_weights import quantize_moe_weights
-from tpu_inference.layers.common.process_weights.moe_weights import shard_moe_weights
-from tpu_inference.layers.common.quant_methods import AWQ
-from tpu_inference.layers.common.quant_methods import get_tpu_quant_method
-from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
-from tpu_inference.layers.common.quantization import dequantize_awq_moe_weight
+from tpu_inference.layers.common.process_weights.linear_weights import (
+    LinearWeights, process_linear_weights, shard_linear_weights,
+    to_parameter_list)
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
+from tpu_inference.layers.common.quant_methods import AWQ, get_tpu_quant_method
+from tpu_inference.layers.common.quantization import (awq_u32_unpack_u4,
+                                                      dequantize_awq_moe_weight
+                                                      )
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import slice_sharded_tensor_for_concatenation
-from tpu_inference.layers.vllm.moe import MoEBackend
-from tpu_inference.layers.vllm.moe import select_moe_backend_from_fused_moe_config
-from tpu_inference.layers.vllm.moe import vllm_moe_apply
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
-from tpu_inference.layers.vllm.quantization.configs import VllmQuantLinearConfig
-from tpu_inference.layers.vllm.quantization.unquantized import VllmUnquantizedLinearMethod
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
+from tpu_inference.layers.vllm.moe import (
+    MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+from tpu_inference.layers.vllm.quantization.configs import (
+    VllmQuantConfig, VllmQuantLinearConfig)
+from tpu_inference.layers.vllm.quantization.unquantized import \
+    VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
