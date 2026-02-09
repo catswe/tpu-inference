@@ -381,11 +381,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         ) -> FusedMoEWeights:
             # Dequantize awq int4 weights to fp32
             w13_weight = dequantize_tensor_from_awq_packed(
-                w13_qweight, w13_scales, w13_qzeros,
-                self.quant_config.group_size, jnp.float32)
+                w13_qweight, w13_qzeros, w13_scales, 1, jnp.float32)
             w2_weight = dequantize_tensor_from_awq_packed(
-                w2_qweight, w2_scales, w2_qzeros, self.quant_config.group_size,
-                jnp.float32)
+                w2_qweight, w2_qzeros, w2_scales, 1, jnp.float32)
+
+            w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+            w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
             w13_interleave = layer.activation == "swigluoai"
             w13_reorder_size = get_mesh_shape_product(

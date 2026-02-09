@@ -88,6 +88,7 @@ def dequantize_tensor(
     axis: int | None | tuple = -1,
     out_dtype: jnp.dtype = jnp.bfloat16,
     block_size: tuple[int, ...] | None = None,
+    zero_point: jax.Array | None = None,
 ) -> jax.Array:
     """Dequantize a quantized tensor
 
@@ -97,6 +98,7 @@ def dequantize_tensor(
         axis: The axis tensor was quantized. None denotes per-tensor.
         out_dtype: Dtype of the output.
         block_size: Block sizes corresponding to `axis`, used to pad partial blocks.
+        zero_point: Zero point for asymmetric quantization.
 
     Returns:
         Dequantized tensor_q.
@@ -142,9 +144,14 @@ def dequantize_tensor(
         blocked_shape = list(itertools.chain(*blocked_shape))
         tensor_q = tensor_q.reshape(blocked_shape)
 
-    scale = jnp.expand_dims(scale, axis)
+    tensor = tensor_q.astype(jnp.float32)
+    if zero_point is not None:
+        zero_point = jnp.expand_dims(zero_point, axis)
+        tensor = tensor - zero_point.astype(jnp.float32)
 
-    tensor = (tensor_q.astype(jnp.float32) * scale).astype(out_dtype)
+    scale = jnp.expand_dims(scale, axis)
+    tensor = (tensor * scale).astype(out_dtype)
+
     tensor = tensor.reshape(aligned_shape)
     return jax.lax.slice(tensor, [0] * tensor.ndim, orig_shape)
 
@@ -179,35 +186,33 @@ def dequantize_tensor_from_mxfp4_packed(
 
 def dequantize_tensor_from_awq_packed(
     tensor_q: jax.Array,
-    scale: jax.Array,
     zero_point: jax.Array,
-    group_size: int,
+    scale: jax.Array,
+    axis: int | tuple = -1,
     out_dtype: jnp.dtype = jnp.bfloat16,
 ) -> jax.Array:
     """Dequantize packed awq weight tensor.
 
     Args:
         tensor_q: uint4 tensor packed into uint32.
-        scale: Quantization scale.
         zero_point: uint4 tensor packed into uint32.
-        group_size: Number of elements per quantization group.
+        scale: Quantization scale.
+        axis: The axis tensor was quantized.
         out_dtype: Dtype of the output.
 
     Returns:
         Dequantized tensor_q.
     """
-    tensor_q = awq_u32_unpack_u4(tensor_q).astype(jnp.float32)
-    zero_point = awq_u32_unpack_u4(zero_point).astype(jnp.float32)
-    scale = scale.astype(jnp.float32)
+    tensor_u4 = awq_u32_unpack_u4(tensor_q)
+    zero_point_u4 = awq_u32_unpack_u4(zero_point)
 
-    tensor_q = tensor_q.reshape(tensor_q.shape[0], -1, group_size,
-                                tensor_q.shape[-1])
-    zero_point = zero_point[:, :, jnp.newaxis, :]
-    scale = scale[:, :, jnp.newaxis, :]
-
-    tensor = ((tensor_q - zero_point) * scale).astype(out_dtype)
-    tensor = tensor.reshape(tensor.shape[0], -1, tensor.shape[-1])
-    return jnp.swapaxes(tensor, 1, 2)
+    return dequantize_tensor(
+        tensor_u4,
+        scale,
+        axis=axis,
+        out_dtype=out_dtype,
+        zero_point=zero_point_u4,
+    )
 
 
 def quantize_tensor(
