@@ -420,13 +420,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_scales,
             w2_qzeros,
         )
-
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))
 
-        # Store the re-quantized fp8 weights and their scales
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+
         layer.w13_weight_scale_inv = Parameter(weights.w13_weight_scale,
                                                requires_grad=False)
         layer.w2_weight_scale_inv = Parameter(weights.w2_weight_scale,
@@ -447,10 +446,8 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_bias=None,
         )
 
-        return vllm_moe_apply(
-            layer=layer,
-            weights=weights,
-            quant_method_instance=self,
-            x=x,
-            router_logits=router_logits,
-        )
+        return vllm_moe_apply(layer=layer,
+                              weights=weights,
+                              quant_method_instance=self,
+                              x=x,
+                              router_logits=router_logits)
