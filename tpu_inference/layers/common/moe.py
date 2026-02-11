@@ -67,6 +67,11 @@ class MoEBackend(Enum):
         """Returns those backends that use fused weights"""
         return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
 
+    @classmethod
+    def expert_sharded_backends(cls):
+        """Returns backends that shard weights along the expert dimension."""
+        return {cls.FUSED_MOE, cls.GMM_EP}
+
 
 def moe_apply(
     layer: Union[FusedMoE, JaxMoE],
