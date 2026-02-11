@@ -38,12 +38,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
-from tpu_inference.layers.common.quant_methods import AWQ
-from tpu_inference.layers.common.quantization import (
-    awq_u32_unpack_u4, dequantize_tensor_from_awq_packed)
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
+from tpu_inference.layers.common.quant_methods import AWQ
+from tpu_inference.layers.common.quantization import (
+    awq_u32_unpack_u4, dequantize_tensor_from_awq_packed)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
@@ -67,6 +67,12 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
     @classmethod
     def get_name(cls):
         return AWQ
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        # NOTE: AWQ checkpoint was quantized with float16. But on TPUs, using
+        # bfloat16 is significantly preferred over float16. This might lead to
+        # some numeric output change.
+        return [torch.bfloat16]
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
