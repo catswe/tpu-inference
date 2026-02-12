@@ -569,17 +569,12 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        x_jax = jax_view(x)
-        w13_qw = jax_view(layer.w13_qweight)
-        w13_qz = jax_view(layer.w13_qzeros)
-        w13_s = jax_view(layer.w13_scales)
-        w2_qw = jax_view(layer.w2_qweight)
-        w2_qz = jax_view(layer.w2_qzeros)
-        w2_s = jax_view(layer.w2_scales)
-
-        (x_jax, w13_qw, w2_qw, w13_qz, w2_qz, w13_s,
-         w2_s) = (jax.lax.optimization_barrier(
-             (x_jax, w13_qw, w2_qw, w13_qz, w2_qz, w13_s, w2_s)))
+        (x_jax, w13_qw, w13_qz, w13_s, w2_qw, w2_qz,
+         w2_s) = jax.lax.optimization_barrier(
+             (jax_view(x), jax_view(layer.w13_qweight),
+              jax_view(layer.w13_qzeros), jax_view(layer.w13_scales),
+              jax_view(layer.w2_qweight), jax_view(layer.w2_qzeros),
+              jax_view(layer.w2_scales)))
 
         weights = _awq_dequant_and_format_moe_weights(
             w13_qw,
