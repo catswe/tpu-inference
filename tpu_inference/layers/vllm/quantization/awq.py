@@ -571,7 +571,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         (w13_qw, w13_qz, w13_s, w2_qw, w2_qz,
          w2_s) = jax.lax.optimization_barrier(
-             (jax_view(x), jax_view(layer.w13_qweight),
+             (jax_view(layer.w13_qweight),
               jax_view(layer.w13_qzeros), jax_view(layer.w13_scales),
               jax_view(layer.w2_qweight), jax_view(layer.w2_qzeros),
               jax_view(layer.w2_scales)))
