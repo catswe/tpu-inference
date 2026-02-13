@@ -545,8 +545,10 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
         w13_qweight = jax.device_put(w13_qweight, sharding)
         w2_qweight = jax.device_put(w2_qweight, sharding)
+
         w13_scales = jax.device_put(w13_scales, sharding)
         w2_scales = jax.device_put(w2_scales, sharding)
+
         w13_qzeros = jax.device_put(w13_qzeros, sharding)
         w2_qzeros = jax.device_put(w2_qzeros, sharding)
 
@@ -571,10 +573,9 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         (w13_qw, w13_qz, w13_s, w2_qw, w2_qz,
          w2_s) = jax.lax.optimization_barrier(
-             (jax_view(layer.w13_qweight),
-              jax_view(layer.w13_qzeros), jax_view(layer.w13_scales),
-              jax_view(layer.w2_qweight), jax_view(layer.w2_qzeros),
-              jax_view(layer.w2_scales)))
+             (jax_view(layer.w13_qweight), jax_view(layer.w13_qzeros),
+              jax_view(layer.w13_scales), jax_view(layer.w2_qweight),
+              jax_view(layer.w2_qzeros), jax_view(layer.w2_scales)))
 
         weights = _awq_dequant_and_format_moe_weights(
             w13_qw,
