@@ -45,7 +45,6 @@ from tpu_inference.layers.common.quantization import (
     awq_u32_unpack_u4, dequantize_tensor_from_awq_packed)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
-    reorder_concatenated_tensor_for_sharding,
     slice_sharded_tensor_for_concatenation)
 from tpu_inference.layers.vllm.moe import (
     MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -54,15 +53,15 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import align_to, get_mesh_shape_product
+from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
 logger = init_logger(__name__)
 
-
 # ---------------------------------------------------------------------------
 # Helpers for non-GMM_EP backends that still dequant on the host side.
 # ---------------------------------------------------------------------------
+
 
 def _awq_dequant_and_format_moe_weights(
     w13_qw: jax.Array,
@@ -83,10 +82,10 @@ def _awq_dequant_and_format_moe_weights(
     AWQ int4 on the fly.
     """
     # Dequantize awq int4 weights to fp32
-    w13_weight = dequantize_tensor_from_awq_packed(
-        w13_qw, w13_qz, w13_s, 1, jnp.float32)
-    w2_weight = dequantize_tensor_from_awq_packed(
-        w2_qw, w2_qz, w2_s, 1, jnp.float32)
+    w13_weight = dequantize_tensor_from_awq_packed(w13_qw, w13_qz, w13_s, 1,
+                                                   jnp.float32)
+    w2_weight = dequantize_tensor_from_awq_packed(w2_qw, w2_qz, w2_s, 1,
+                                                  jnp.float32)
 
     w13_weight = jnp.swapaxes(w13_weight, 1, 2)
     w2_weight = jnp.swapaxes(w2_weight, 1, 2)
@@ -114,6 +113,7 @@ def _awq_dequant_and_format_moe_weights(
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 @register_quantization_config(AWQ)
 class VllmAWQConfig(AWQConfig, VllmQuantConfig):
@@ -145,6 +145,7 @@ class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 # ---------------------------------------------------------------------------
 # Linear method (unchanged from the current version)
 # ---------------------------------------------------------------------------
+
 
 class VllmAWQLinearMethod(AWQLinearMethod):
 
@@ -282,6 +283,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 # ---------------------------------------------------------------------------
 # MoE method — with on-the-fly kernel dequant for GMM_EP
 # ---------------------------------------------------------------------------
+
 
 class VllmAWQMoEMethod(FusedMoEMethodBase):
 
@@ -449,8 +451,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             # Checkpoint layout already matches (E, in_features, out_packed)
             # so no reshape is needed for weights or zeros.
 
-            ep_sharding = NamedSharding(
-                self.mesh, P(ShardingAxisName.EXPERT))
+            ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
 
             # AWQ checkpoints store packed int4 values as int32.  The GMM
             # kernel operates on the raw bit patterns via shifts & masks so
@@ -468,24 +469,22 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w2_qzeros = jax.device_put(w2_qzeros, ep_sharding)
 
             # Format scales for GMM kernel: (E, num_blocks, 1, n_unpacked)
-            w13_scales = jnp.expand_dims(
-                w13_scales.astype(jnp.bfloat16), 2)
-            w2_scales = jnp.expand_dims(
-                w2_scales.astype(jnp.bfloat16), 2)
+            w13_scales = jnp.expand_dims(w13_scales.astype(jnp.bfloat16), 2)
+            w2_scales = jnp.expand_dims(w2_scales.astype(jnp.bfloat16), 2)
 
             # Store packed weights directly — no dequant, no barrier.
-            layer.w13_weight = Parameter(
-                torch_view(w13_qweight), requires_grad=False)
-            layer.w2_weight = Parameter(
-                torch_view(w2_qweight), requires_grad=False)
-            layer.w13_weight_scale_inv = Parameter(
-                torch_view(w13_scales), requires_grad=False)
-            layer.w2_weight_scale_inv = Parameter(
-                torch_view(w2_scales), requires_grad=False)
-            layer.w13_weight_zeros = Parameter(
-                torch_view(w13_qzeros), requires_grad=False)
-            layer.w2_weight_zeros = Parameter(
-                torch_view(w2_qzeros), requires_grad=False)
+            layer.w13_weight = Parameter(torch_view(w13_qweight),
+                                         requires_grad=False)
+            layer.w2_weight = Parameter(torch_view(w2_qweight),
+                                        requires_grad=False)
+            layer.w13_weight_scale_inv = Parameter(torch_view(w13_scales),
+                                                   requires_grad=False)
+            layer.w2_weight_scale_inv = Parameter(torch_view(w2_scales),
+                                                  requires_grad=False)
+            layer.w13_weight_zeros = Parameter(torch_view(w13_qzeros),
+                                               requires_grad=False)
+            layer.w2_weight_zeros = Parameter(torch_view(w2_qzeros),
+                                              requires_grad=False)
 
         else:
             # =============================================================
@@ -496,8 +495,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             if self.moe_backend in MoEBackend.fused_moe_backends() - {
                     MoEBackend.GMM_TP
             }:
-                sharding = NamedSharding(
-                    self.mesh, P(ShardingAxisName.EXPERT))
+                sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
             else:
                 sharding = NamedSharding(self.mesh, P())
 
@@ -510,11 +508,20 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
             @jax.jit
             def _dequant_and_format(
-                w13_qw, w13_qz, w13_s, w2_qw, w2_qz, w2_s,
+                w13_qw,
+                w13_qz,
+                w13_s,
+                w2_qw,
+                w2_qz,
+                w2_s,
             ) -> FusedMoEWeights:
                 return _awq_dequant_and_format_moe_weights(
-                    w13_qw, w13_qz, w13_s,
-                    w2_qw, w2_qz, w2_s,
+                    w13_qw,
+                    w13_qz,
+                    w13_s,
+                    w2_qw,
+                    w2_qz,
+                    w2_s,
                     group_size=self.quant_config.group_size,
                     moe_backend=self.moe_backend,
                     w13_interleave=self._w13_interleave,
@@ -523,20 +530,23 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                 )
 
             weights = _dequant_and_format(
-                w13_qweight, w13_scales, w13_qzeros,
-                w2_qweight, w2_scales, w2_qzeros,
+                w13_qweight,
+                w13_scales,
+                w13_qzeros,
+                w2_qweight,
+                w2_scales,
+                w2_qzeros,
             )
             weights = torch_view(
                 shard_moe_weights(weights, self.moe_backend, self.mesh))
 
-            layer.w13_weight = Parameter(
-                weights.w13_weight, requires_grad=False)
-            layer.w2_weight = Parameter(
-                weights.w2_weight, requires_grad=False)
-            layer.w13_weight_scale_inv = Parameter(
-                weights.w13_weight_scale, requires_grad=False)
-            layer.w2_weight_scale_inv = Parameter(
-                weights.w2_weight_scale, requires_grad=False)
+            layer.w13_weight = Parameter(weights.w13_weight,
+                                         requires_grad=False)
+            layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+            layer.w13_weight_scale_inv = Parameter(weights.w13_weight_scale,
+                                                   requires_grad=False)
+            layer.w2_weight_scale_inv = Parameter(weights.w2_weight_scale,
+                                                  requires_grad=False)
 
     def apply_monolithic(
         self,

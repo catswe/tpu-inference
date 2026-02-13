@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Grouped matrix multiplication kernels for TPU written in Pallas."""
 
 import functools
@@ -42,8 +55,10 @@ def _awq_unpack_tile(packed_tile: jnp.ndarray) -> jnp.ndarray:
     for s in _AWQ_SHIFTS:
         # Use int32 instead of int8 to avoid illegal minor-dim insertion on TPU
         parts.append(((packed_tile >> jnp.uint32(s)) & mask).astype(jnp.int32))
-    stacked = jnp.stack(parts, axis=-1)  # (..., N_packed, 8) — int32, legal on TPU
-    return stacked.reshape(stacked.shape[:-2] + (-1,)).astype(jnp.int8)
+    stacked = jnp.stack(parts,
+                        axis=-1)  # (..., N_packed, 8) — int32, legal on TPU
+    return stacked.reshape(stacked.shape[:-2] + (-1, )).astype(jnp.int8)
+
 
 # ---------------------------------------------------------------------------
 
@@ -72,14 +87,11 @@ def _validate_args(
     if awq_pack_factor > 0:
         # When AWQ packed, rhs is uint32 and output dim is packed.
         if rhs.dtype != jnp.uint32:
-            raise ValueError(
-                f"AWQ packed rhs must be uint32, got {rhs.dtype}")
+            raise ValueError(f"AWQ packed rhs must be uint32, got {rhs.dtype}")
         if rhs_zeros is None:
-            raise ValueError(
-                "rhs_zeros is required when awq_pack_factor > 0")
+            raise ValueError("rhs_zeros is required when awq_pack_factor > 0")
         if rhs_scale is None:
-            raise ValueError(
-                "rhs_scale is required when awq_pack_factor > 0")
+            raise ValueError("rhs_scale is required when awq_pack_factor > 0")
         # k dimension is NOT packed; only the n (output) dimension is packed.
         if lhs.shape[1] != rhs.shape[1]:
             raise ValueError(
@@ -417,7 +429,7 @@ def gmm(
     # packed rhs / rhs_zeros tiles have last-dim size  tn_packed = tn / pack,
     # we must ensure  tn >= 128 * awq_pack_factor  so that tn_packed >= 128.
     if awq_pack_factor > 0:
-        min_tn = 128 * awq_pack_factor          # 1024 for 4-bit AWQ
+        min_tn = 128 * awq_pack_factor  # 1024 for 4-bit AWQ
         if tn < min_tn:
             tn = min_tn
         assert tn % awq_pack_factor == 0, (
@@ -505,8 +517,10 @@ def gmm(
                 mask_k_rem_lhs = partial(mask_k_rem, dim=1)
                 mask_k_rem_rhs = partial(mask_k_rem, dim=0)
             else:
+
                 def _wrapper(x):
                     return x
+
                 mask_k_rem_lhs = _wrapper
                 mask_k_rem_rhs = _wrapper
 
@@ -533,10 +547,10 @@ def gmm(
             acc = acc_scratch[...]
 
             for b_i in range(num_quant_blocks_per_tk):
-                rhs_slice = loaded_rhs[
-                    b_i * quant_block_size:(b_i + 1) * quant_block_size, ...]
-                lhs_slice = loaded_lhs[
-                    ..., b_i * quant_block_size:(b_i + 1) * quant_block_size]
+                rhs_slice = loaded_rhs[b_i * quant_block_size:(b_i + 1) *
+                                       quant_block_size, ...]
+                lhs_slice = loaded_lhs[..., b_i * quant_block_size:(b_i + 1) *
+                                       quant_block_size]
 
                 # Subtract AWQ zero-point before the dot product.
                 if _is_awq:
@@ -627,8 +641,7 @@ def gmm(
     lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
 
     # rhs block spec uses tn_packed for AWQ path.
-    rhs_block_spec = pl.BlockSpec((None, tk, tn_packed),
-                                  rhs_transform_indices)
+    rhs_block_spec = pl.BlockSpec((None, tk, tn_packed), rhs_transform_indices)
 
     if rhs_scale is None:
         rhs_scale_block_spec = None

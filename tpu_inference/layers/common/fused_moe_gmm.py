@@ -92,8 +92,14 @@ def round_up_to_multiple_of_128_within_limit(x: int, limit: int) -> int:
     return limit
 
 
-def gmm_wrapper(lhs, rhs, rhs_scale, rhs_bias, group_sizes, group_offset,
-                rhs_zeros=None, awq_pack_factor=0):
+def gmm_wrapper(lhs,
+                rhs,
+                rhs_scale,
+                rhs_bias,
+                group_sizes,
+                group_offset,
+                rhs_zeros=None,
+                awq_pack_factor=0):
     gmm_res = gmm(
         lhs=lhs,
         rhs=rhs,
@@ -137,7 +143,11 @@ def moe_gmm_local(
 
     # GMM1 computes x @ (W_up | W_gate) tegether and then split out to apply activation
     # to the gate result
-    gmm1_res_gate_up = gmm_wrapper(x, w1, w1_scale, w1_bias, group_sizes,
+    gmm1_res_gate_up = gmm_wrapper(x,
+                                   w1,
+                                   w1_scale,
+                                   w1_bias,
+                                   group_sizes,
                                    group_offset,
                                    rhs_zeros=w1_zeros,
                                    awq_pack_factor=awq_pack_factor)
@@ -151,10 +161,14 @@ def moe_gmm_local(
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
 
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                            group_offset,
-                            rhs_zeros=w2_zeros,
-                            awq_pack_factor=awq_pack_factor)
+    gmm2_res = gmm_wrapper(gmm1_res,
+                           w2,
+                           w2_scale,
+                           w2_bias,
+                           group_sizes,
+                           group_offset,
+                           rhs_zeros=w2_zeros,
+                           awq_pack_factor=awq_pack_factor)
 
     # First run local reduction on topk experts owned by the rank for all tokens
     token_topk_hidden = gmm2_res[topk_argsort_revert_indices].reshape(
@@ -256,13 +270,13 @@ def expert_parallel_gmm(
         mesh=mesh,
         in_specs=(data_p_spec, ep_p_spec, w1_scale_spec, w1_bias_spec,
                   ep_p_spec, w2_scale_spec, w2_bias_spec, data_p_spec,
-                  ep_p_spec, data_p_spec, data_p_spec,
-                  w1_zeros_spec, w2_zeros_spec),
+                  ep_p_spec, data_p_spec, data_p_spec, w1_zeros_spec,
+                  w2_zeros_spec),
         out_specs=(data_p_spec),
         check_vma=False,
     )(x, w1, w1_scale, w1_bias, w2, w2_scale, w2_bias, group_sizes,
-      group_offset, topk_argsort_revert_indices, topk_weights,
-      w1_zeros, w2_zeros)
+      group_offset, topk_argsort_revert_indices, topk_weights, w1_zeros,
+      w2_zeros)
 
 
 @functools.partial(
