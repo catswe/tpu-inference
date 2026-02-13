@@ -55,11 +55,6 @@ class MoEBackend(Enum):
         """Returns those backends that use fused weights"""
         return {cls.FUSED_MOE, cls.GMM_EP, cls.GMM_TP}
 
-    @classmethod
-    def expert_sharded_backends(cls):
-        """Returns backends that shard weights along the expert dimension."""
-        return {cls.FUSED_MOE, cls.GMM_EP}
-
 
 def moe_apply(
     layer: Union[FusedMoE, JaxMoE],
@@ -70,7 +65,6 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-
     with jax.named_scope(layer._get_name()):
         match moe_backend:
             case MoEBackend.FUSED_MOE:
@@ -93,6 +87,7 @@ def moe_apply(
                 actual_hidden_size = x.shape[-1]
                 padding_size = weights.w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
+
                 output = fused_ep_moe(
                     mesh=mesh,
                     tokens=x,
@@ -111,7 +106,13 @@ def moe_apply(
                     b2=weights.w2_bias,
                     **extra_backend_kwargs,
                 )[:, :actual_hidden_size]
+
             case MoEBackend.GMM_EP | MoEBackend.GMM_TP:
+                # Extract AWQ-specific kwargs; they are static args for the
+                # jitted fused_moe_func so we pop them out of the dict.
+                awq_pack_factor = extra_backend_kwargs.get(
+                    "awq_pack_factor", 0)
+
                 output = fused_moe_func(
                     hidden_states=x,
                     w1=weights.w13_weight,
@@ -127,11 +128,16 @@ def moe_apply(
                     use_ep=layer.use_ep,
                     activation=layer.activation,
                     scoring_fn=layer.scoring_func,
+                    w1_zeros=weights.w13_weight_zeros,
+                    w2_zeros=weights.w2_weight_zeros,
+                    awq_pack_factor=awq_pack_factor,
                 )
+
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.dense_moe import \
                     dense_moe_func
+
                 assert isinstance(
                     gating_output,
                     tuple), "Expected the gating output to be a tuple"
@@ -154,7 +160,6 @@ def moe_apply(
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.sparse_moe import \
                     sparse_moe_func
-
                 return sparse_moe_func(weights=weights,
                                        x_TD=x,
                                        gating_output=gating_output,
