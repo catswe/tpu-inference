@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,24 +55,10 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
-
 logger = init_logger(__name__)
 
 
-def _awq_unpack_int8(
-    qweight: jax.Array,
-    qzeros: jax.Array,
-    group_size: int,
-) -> jax.Array:
-    w = awq_u32_unpack_u4(qweight).astype(jnp.int8)
-    z = awq_u32_unpack_u4(qzeros).astype(jnp.int8)
-
-    E, in_feat, out_feat = w.shape
-    return (w.reshape(E, -1, group_size, out_feat) - z[:, :, None, :]).reshape(
-        E, in_feat, out_feat)
-
-
-def _awq_dequant_and_format_moe_weights(
+def _awq_unpack_and_format_moe_weights(
     w13_qw: jax.Array,
     w13_qz: jax.Array,
     w13_s: jax.Array,
@@ -85,16 +71,45 @@ def _awq_dequant_and_format_moe_weights(
     w13_reorder_size: int,
     mesh: Mesh,
 ) -> FusedMoEWeights:
-    w13 = _awq_unpack_int8(w13_qw, w13_qz, group_size)
-    w2 = _awq_unpack_int8(w2_qw, w2_qz, group_size)
+    """Unpack AWQ int4 MoE weights and format for the target backend.
+
+    Unlike the previous _awq_dequant_and_format_moe_weights, this does NOT
+    subtract zero points from the weights. The int8 weights and int8 zero
+    points are kept separate so that the GMM kernel can perform the
+    subtraction per tile, avoiding materialisation of a full dequantized
+    tensor in HBM.
+
+    Args:
+        w13_qw: Packed int32 gate+up weights  (E, hidden, 2*inter // pack).
+        w13_qz: Packed int32 gate+up zeros    (E, groups, 2*inter // pack).
+        w13_s:  Gate+up scales                 (E, groups, 2*inter).
+        w2_qw:  Packed int32 down weights      (E, inter, hidden // pack).
+        w2_qz:  Packed int32 down zeros        (E, groups, hidden // pack).
+        w2_s:   Down scales                    (E, groups, hidden).
+        group_size: AWQ quantisation group size.
+        moe_backend: Target MoE backend.
+        w13_interleave: Whether w13 is stored interleaved.
+        w13_reorder_size: Reorder chunk count for GMM_TP.
+        mesh: Device mesh.
+
+    Returns:
+        FusedMoEWeights with int8 weights, bf16 scales, int8 zero points,
+        and None biases, formatted for the chosen backend.
+    """
+    w13 = awq_u32_unpack_u4(w13_qw)
+    w13_zp = awq_u32_unpack_u4(w13_qz)
+    w2 = awq_u32_unpack_u4(w2_qw)
+    w2_zp = awq_u32_unpack_u4(w2_qz)
 
     return process_moe_weights(
         FusedMoEWeights(
             w13_weight=w13,
-            w13_weight_scale=w13_s.astype(jnp.bfloat16),
+            w13_weight_scale=w13_s,
+            w13_weight_zero_point=w13_zp,
             w13_bias=None,
             w2_weight=w2,
-            w2_weight_scale=w2_s.astype(jnp.bfloat16),
+            w2_weight_scale=w2_s,
+            w2_weight_zero_point=w2_zp,
             w2_bias=None,
         ),
         moe_backend=moe_backend,
@@ -140,6 +155,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert layer.qweight.packed_dim == layer.qweight.ndim - 1
+
         weight = t2j(layer.qweight, use_dlpack=False)
         delattr(layer, "qweight")
 
@@ -168,9 +184,7 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             weight = awq_u32_unpack_u4(weight)
             group_size = self.quant_config.group_size
             weight = weight.reshape((-1, group_size, weight.shape[-1]))
-
             zero_point = awq_u32_unpack_u4(zero_point)
-
             return process_linear_weights(
                 LinearWeights(
                     weight=weight,
@@ -194,7 +208,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                 bias_p_spec=self.linear_config.bias_sharding,
                 transposed=False,
             ))
-
         if self.linear_config.fuse_matmuls:
             layer.qweight = Parameter(weights.weight, requires_grad=False)
             layer.scales = Parameter(weights.weight_scale, requires_grad=False)
@@ -212,13 +225,11 @@ class VllmAWQLinearMethod(AWQLinearMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
         with jax.named_scope(layer._get_name()):
             if self.linear_config.fuse_matmuls:
                 out = self._apply_fused(layer, x, bias)
             else:
                 out = self._apply_split(layer, x, bias)
-
         return out
 
     def _apply_fused(self,
@@ -226,21 +237,16 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         x_jax = jax_view(x)
-
         qweight = jax_view(layer.qweight)
         qzeros = jnp.expand_dims(jax_view(layer.qzeros), 1)
         scales = jnp.expand_dims(jax_view(layer.scales), 1)
-
         qweight = qweight.astype(jnp.int8)
         qzeros = qzeros.astype(jnp.int8)
-
         weight = (qweight - qzeros) * scales
         weight = weight.reshape((-1, weight.shape[-1]))
         outs = jnp.einsum("bd,df->bf", x_jax, weight)
-
         if bias is not None and not layer.skip_bias_add:
             outs += bias.jax()
-
         outs = slice_sharded_tensor_for_concatenation(
             outs, self.linear_config.output_sizes, self.linear_config.n_shards)
         out = jnp.concatenate(outs, axis=-1)
@@ -251,7 +257,6 @@ class VllmAWQLinearMethod(AWQLinearMethod):
                      x: torch.Tensor,
                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert isinstance(layer.qweight, torch.nn.ParameterList)
-
         x_jax = jax_view(x)
         params = zip(layer.qweight, layer.qzeros, layer.scales)
         outs = []
@@ -259,17 +264,13 @@ class VllmAWQLinearMethod(AWQLinearMethod):
             qweight = jax_view(qweight)
             scales = jnp.expand_dims(jax_view(scales), 1)
             qzeros = jnp.expand_dims(jax_view(qzeros), 1)
-
             qweight = qweight.astype(jnp.int8)
             qzeros = qzeros.astype(jnp.int8)
-
             weight = (qweight - qzeros) * scales
             weight = weight.reshape((-1, weight.shape[-1]))
             out = jnp.einsum("bd,df->bf", x_jax, weight)
-
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
-
             outs.append(out)
         out = jnp.concatenate(outs, axis=-1)
         return torch_view(out)
@@ -286,14 +287,11 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
     ):
         FusedMoEMethodBase.__init__(self, layer.moe_config)
         self.quant_config = quant_config
-
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
-
         self.extra_backend_kwargs = {}
         if self.moe_backend == MoEBackend.FUSED_MOE:
             self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name)
-
         self._w13_interleave = layer.activation == "swigluoai"
         self._w13_reorder_size = get_mesh_shape_product(
             self.mesh, ShardingAxisName.MLP_TENSOR)
@@ -402,24 +400,20 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         assert isinstance(layer, FusedMoE)
-
         assert not self.moe.has_bias
 
         w13_qweight = t2j(layer.w13_qweight, use_dlpack=False)
         delattr(layer, "w13_qweight")
-
         w2_qweight = t2j(layer.w2_qweight, use_dlpack=False)
         delattr(layer, "w2_qweight")
 
         w13_scales = t2j(layer.w13_scales, use_dlpack=False)
         delattr(layer, "w13_scales")
-
         w2_scales = t2j(layer.w2_scales, use_dlpack=False)
         delattr(layer, "w2_scales")
 
         w13_qzeros = t2j(layer.w13_qzeros, use_dlpack=False)
         delattr(layer, "w13_qzeros")
-
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
         delattr(layer, "w2_qzeros")
 
@@ -439,11 +433,9 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
                                       requires_grad=False)
         layer.w2_qweight = Parameter(torch_view(w2_qweight),
                                      requires_grad=False)
-
         layer.w13_scales = Parameter(torch_view(w13_scales),
                                      requires_grad=False)
         layer.w2_scales = Parameter(torch_view(w2_scales), requires_grad=False)
-
         layer.w13_qzeros = Parameter(torch_view(w13_qzeros),
                                      requires_grad=False)
         layer.w2_qzeros = Parameter(torch_view(w2_qzeros), requires_grad=False)
@@ -454,7 +446,7 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        weights = _awq_dequant_and_format_moe_weights(
+        weights = _awq_unpack_and_format_moe_weights(
             w13_qw=jax_view(layer.w13_qweight),
             w13_qz=jax_view(layer.w13_qzeros),
             w13_s=jax_view(layer.w13_scales),
@@ -467,7 +459,6 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
             w13_reorder_size=self._w13_reorder_size,
             mesh=self.mesh,
         )
-
         return vllm_moe_apply(layer=layer,
                               weights=weights,
                               quant_method_instance=self,

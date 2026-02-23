@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import functools
 from dataclasses import dataclass, fields
 
@@ -37,9 +38,11 @@ class FusedMoEWeights:
     """Fused moe weights. weights can be either jax or torchax array."""
     w13_weight: jax.Array | Tensor
     w13_weight_scale: jax.Array | Tensor | None
+    w13_weight_zero_point: jax.Array | Tensor | None
     w13_bias: jax.Array | Tensor | None
     w2_weight: jax.Array | Tensor
     w2_weight_scale: jax.Array | Tensor | None
+    w2_weight_zero_point: jax.Array | Tensor | None
     w2_bias: jax.Array | Tensor | None
 
 
@@ -76,11 +79,13 @@ def quantize_moe_weights(
     Returns:
         Quantized fused moe weights that may have also been padded.
     """
-
     # If scale is present, it means the weights are already quantized.
     # Ensure that weights are not quantized by checking if scales are None.
     assert weights.w13_weight_scale is None
     assert weights.w2_weight_scale is None
+    # Zero points should not be present when quantizing from scratch.
+    assert weights.w13_weight_zero_point is None
+    assert weights.w2_weight_zero_point is None
 
     w13_weight = weights.w13_weight
     w2_weight = weights.w2_weight
@@ -93,13 +98,13 @@ def quantize_moe_weights(
         w13_block_size = w2_block_size = block_size
 
     _, orig_hidden_size, orig_intermediate_size = w2_weight.shape
-
     hidden_size = align_to(orig_hidden_size, w13_block_size)
     intermediate_size = align_to(orig_intermediate_size, w2_block_size)
 
     w13_pad_widths = [[0, 0] for _ in range(3)]
     w13_pad_widths[1][1] = 2 * (intermediate_size - orig_intermediate_size)
     w13_pad_widths[2][1] = hidden_size - orig_hidden_size
+
     w2_pad_widths = [[0, 0] for _ in range(3)]
     w2_pad_widths[1][1] = hidden_size - orig_hidden_size
     w2_pad_widths[2][1] = intermediate_size - orig_intermediate_size
@@ -119,9 +124,10 @@ def quantize_moe_weights(
 
     weights.w13_weight = w13_weight
     weights.w13_weight_scale = w13_weight_scale
+    weights.w13_weight_zero_point = None
     weights.w2_weight = w2_weight
     weights.w2_weight_scale = w2_weight_scale
-
+    weights.w2_weight_zero_point = None
     return weights
 
 
@@ -151,12 +157,13 @@ def process_moe_weights(
     Returns:
         MoE weights that are processed for specified backend.
     """
-
     w13_weight = weights.w13_weight
     w13_weight_scale = weights.w13_weight_scale
+    w13_weight_zero_point = weights.w13_weight_zero_point
     w13_bias = weights.w13_bias
     w2_weight = weights.w2_weight
     w2_weight_scale = weights.w2_weight_scale
+    w2_weight_zero_point = weights.w2_weight_zero_point
     w2_bias = weights.w2_bias
 
     if transposed:
@@ -169,20 +176,35 @@ def process_moe_weights(
             w1_weight = w13_weight[:, :, ::2]
             w3_weight = w13_weight[:, :, 1::2]
             w13_weight = jnp.concat([w1_weight, w3_weight], axis=2)
+
             if w13_weight_scale is not None:
                 w1_weight_scale = w13_weight_scale[:, :, ::2]
                 w3_weight_scale = w13_weight_scale[:, :, 1::2]
                 w13_weight_scale = jnp.concat(
                     [w1_weight_scale, w3_weight_scale], axis=2)
+
+            if w13_weight_zero_point is not None:
+                w1_weight_zp = w13_weight_zero_point[:, :, ::2]
+                w3_weight_zp = w13_weight_zero_point[:, :, 1::2]
+                w13_weight_zero_point = jnp.concat(
+                    [w1_weight_zp, w3_weight_zp], axis=2)
         else:
             w1_weight = w13_weight[:, ::2, :]
             w3_weight = w13_weight[:, 1::2, :]
             w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
+
             if w13_weight_scale is not None:
                 w1_weight_scale = w13_weight_scale[:, ::2, :]
                 w3_weight_scale = w13_weight_scale[:, 1::2, :]
                 w13_weight_scale = jnp.concat(
                     [w1_weight_scale, w3_weight_scale], axis=1)
+
+            if w13_weight_zero_point is not None:
+                w1_weight_zp = w13_weight_zero_point[:, ::2, :]
+                w3_weight_zp = w13_weight_zero_point[:, 1::2, :]
+                w13_weight_zero_point = jnp.concat(
+                    [w1_weight_zp, w3_weight_zp], axis=1)
+
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
             w3_bias = w13_bias[:, 1::2]
@@ -192,7 +214,6 @@ def process_moe_weights(
         # Transpose non-contracting dim to rightmost dim.
         w13_weight = jnp.swapaxes(w13_weight, 1, 2)
         w2_weight = jnp.swapaxes(w2_weight, 1, 2)
-
         # Workaround for JAX error "must have valid byte strides"
         w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
         w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
@@ -202,14 +223,29 @@ def process_moe_weights(
         if not transposed:
             w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
+
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
         if not transposed:
             w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
+
+    if w13_weight_zero_point is not None:
+        # Keep zero points in their original integer dtype (int8) for
+        # kernel-side subtraction.
+        if not transposed:
+            w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1, 2)
+        w13_weight_zero_point = jnp.expand_dims(w13_weight_zero_point, 2)
+
+    if w2_weight_zero_point is not None:
+        if not transposed:
+            w2_weight_zero_point = jnp.swapaxes(w2_weight_zero_point, 1, 2)
+        w2_weight_zero_point = jnp.expand_dims(w2_weight_zero_point, 2)
+
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
         w13_bias = jnp.expand_dims(w13_bias, 1)
+
     if w2_bias is not None:
         w2_bias = w2_bias.astype(jnp.float32)
         w2_bias = jnp.expand_dims(w2_bias, 1)
@@ -222,7 +258,6 @@ def process_moe_weights(
             # Current format:
             # w13_weight: (num_experts, 2*intermediate_size, hidden_size)
             # w2_weight: (num_experts, hidden_size, intermediate_size)
-
             w13_weight = w13_weight.reshape(
                 num_experts,
                 hidden_size,
@@ -243,7 +278,6 @@ def process_moe_weights(
                 ((0, 0), (0, 0), (0, pad_width_hidden_size),
                  (0, pad_width_intermediate_size)),
             )
-
             w2_weight = jnp.pad(
                 w2_weight,
                 ((0, 0), (0, pad_width_intermediate_size),
@@ -259,9 +293,28 @@ def process_moe_weights(
                     ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
                      (0, pad_width_intermediate_size)),
                 )
+
             if w2_weight_scale is not None:
                 w2_weight_scale = jnp.pad(
                     w2_weight_scale,
+                    ((0, 0), (0, pad_width_intermediate_size), (0, 0),
+                     (0, pad_width_hidden_size)),
+                )
+
+            if w13_weight_zero_point is not None:
+                w13_weight_zero_point = w13_weight_zero_point.reshape(
+                    num_experts, -1, 2, 1, intermediate_size)
+                w13_weight_zero_point = jnp.swapaxes(w13_weight_zero_point, 1,
+                                                     2)
+                w13_weight_zero_point = jnp.pad(
+                    w13_weight_zero_point,
+                    ((0, 0), (0, 0), (0, pad_width_hidden_size), (0, 0),
+                     (0, pad_width_intermediate_size)),
+                )
+
+            if w2_weight_zero_point is not None:
+                w2_weight_zero_point = jnp.pad(
+                    w2_weight_zero_point,
                     ((0, 0), (0, pad_width_intermediate_size), (0, 0),
                      (0, pad_width_hidden_size)),
                 )
@@ -283,12 +336,14 @@ def process_moe_weights(
             assert w13_reorder_size is not None
             assert intermediate_size % w13_reorder_size == 0
             output_sizes = [intermediate_size, intermediate_size]
+
             w13_weight = reorder_concatenated_tensor_for_sharding(
                 w13_weight,
                 output_sizes,
                 w13_reorder_size,
                 dim=2,
             )
+
             if w13_weight_scale is not None:
                 w13_weight_scale = reorder_concatenated_tensor_for_sharding(
                     w13_weight_scale,
@@ -296,6 +351,16 @@ def process_moe_weights(
                     w13_reorder_size,
                     dim=3,
                 )
+
+            if w13_weight_zero_point is not None:
+                w13_weight_zero_point = (
+                    reorder_concatenated_tensor_for_sharding(
+                        w13_weight_zero_point,
+                        output_sizes,
+                        w13_reorder_size,
+                        dim=3,
+                    ))
+
             if w13_bias is not None:
                 w13_bias = reorder_concatenated_tensor_for_sharding(
                     w13_bias,
@@ -303,6 +368,7 @@ def process_moe_weights(
                     w13_reorder_size,
                     dim=2,
                 )
+
         case MoEBackend.GMM_EP:
             # No additional processing is needed for GMM_EP.
             pass
@@ -312,6 +378,7 @@ def process_moe_weights(
             raise NotImplementedError(
                 "process_moe_weights is not yet implemented for dense matmul backend."
             )
+
         case MoEBackend.MEGABLX_GMM:
             # TODO (jacobplatin)
             raise NotImplementedError(
@@ -321,9 +388,11 @@ def process_moe_weights(
     return FusedMoEWeights(
         w13_weight=w13_weight,
         w13_weight_scale=w13_weight_scale,
+        w13_weight_zero_point=w13_weight_zero_point,
         w13_bias=w13_bias,
         w2_weight=w2_weight,
         w2_weight_scale=w2_weight_scale,
+        w2_weight_zero_point=w2_weight_zero_point,
         w2_bias=w2_bias,
     )
 
@@ -333,18 +402,20 @@ def shard_moe_weights(
     moe_backend: MoEBackend,
     mesh: Mesh,
 ) -> FusedMoEWeights:
-
     match moe_backend:
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
             ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
             weight_shardings = FusedMoEWeights(
                 w13_weight=ep_sharding,
                 w13_weight_scale=ep_sharding,
+                w13_weight_zero_point=ep_sharding,
                 w13_bias=ep_sharding,
                 w2_weight=ep_sharding,
                 w2_weight_scale=ep_sharding,
+                w2_weight_zero_point=ep_sharding,
                 w2_bias=ep_sharding,
             )
+
         case MoEBackend.GMM_TP:
             # When using per-channel, in_dim // block_size == 1. This means we
             # are unable to shard w2_weight_scale along 1st dim. Therefore, we
@@ -354,12 +425,24 @@ def shard_moe_weights(
                 w2_weight_scale_p_spec = P()
             else:
                 w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
+
+            # Same logic for w2 zero point.
+            if (weights.w2_weight_zero_point is not None
+                    and weights.w2_weight_zero_point.shape[1] == 1):
+                w2_weight_zp_p_spec = P()
+            else:
+                w2_weight_zp_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
+
             weight_shardings = FusedMoEWeights(
                 w13_weight=NamedSharding(
                     mesh,
                     P(None, None, ShardingAxisName.MLP_TENSOR),
                 ),  # (num_experts, out_dim, in_dim)
                 w13_weight_scale=NamedSharding(
+                    mesh,
+                    P(None, None, None, ShardingAxisName.MLP_TENSOR),
+                ),  # (num_experts, in_dim // block_size, 1, out_dim)
+                w13_weight_zero_point=NamedSharding(
                     mesh,
                     P(None, None, None, ShardingAxisName.MLP_TENSOR),
                 ),  # (num_experts, in_dim // block_size, 1, out_dim)
@@ -374,6 +457,9 @@ def shard_moe_weights(
                 w2_weight_scale=NamedSharding(
                     mesh, w2_weight_scale_p_spec
                 ),  # (num_experts, in_dim // block_size, 1, out_dim)
+                w2_weight_zero_point=NamedSharding(
+                    mesh, w2_weight_zp_p_spec
+                ),  # (num_experts, in_dim // block_size, 1, out_dim)
                 w2_bias=NamedSharding(
                     mesh,
                     P(None, None, None),
@@ -385,18 +471,23 @@ def shard_moe_weights(
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2, 3)),
                 w13_weight_scale=Layout((0, 1, 2, 3, 4)),
+                w13_weight_zero_point=Layout((0, 1, 2, 3, 4)),
                 w13_bias=Layout((0, 1, 2, 3)),
                 w2_weight=Layout((0, 1, 2)),
                 w2_weight_scale=Layout((0, 1, 2, 3)),
+                w2_weight_zero_point=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
+
         case MoEBackend.GMM_TP | MoEBackend.GMM_EP:
             weight_layouts = FusedMoEWeights(
                 w13_weight=Layout((0, 1, 2)),
                 w13_weight_scale=Layout((0, 1, 2, 3)),
+                w13_weight_zero_point=Layout((0, 1, 2, 3)),
                 w13_bias=Layout((0, 1, 2)),
                 w2_weight=Layout((0, 1, 2)),
                 w2_weight_scale=Layout((0, 1, 2, 3)),
+                w2_weight_zero_point=Layout((0, 1, 2, 3)),
                 w2_bias=Layout((0, 1, 2)),
             )
 
@@ -407,6 +498,7 @@ def shard_moe_weights(
             sharding = getattr(weight_shardings, key)
             weight = general_device_put(weight, sharding, layout)
             setattr(weights, key, weight)
+
     return weights
 
 
@@ -445,14 +537,17 @@ def process_fp8_moe_weights(
         FusedMoEWeights(
             w13_weight=w13_weight,
             w13_weight_scale=None,
+            w13_weight_zero_point=None,
             w13_bias=None,
             w2_weight=w2_weight,
             w2_weight_scale=None,
+            w2_weight_zero_point=None,
             w2_bias=None,
         ),
         jnp.float8_e4m3fn,
         None,
     )
+
     return process_moe_weights(
         weights,
         moe_backend=moe_backend,

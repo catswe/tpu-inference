@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -59,6 +59,7 @@ class MoEBackend(Enum):
     # NOTE: for DENSE_MAT in the JAX/Flax path, there are no changes for weights for the unfused backends (DENSE_MAT and MEGABLOX_GMM).
     # That is, `kernel_gating_EDF`, `kernel_up_proj_EDF`, and `kernel_down_proj_EFD` are unchanged.
     DENSE_MAT = "dense_mat"
+
     # Also only used in the JAX path for now
     MEGABLX_GMM = "megablox_gmm"
 
@@ -82,7 +83,6 @@ def moe_apply(
     mesh: Mesh,
     extra_backend_kwargs: dict,
 ) -> jax.Array:
-
     with jax.named_scope(layer._get_name()):
         activation = layer.activation if isinstance(
             layer.activation, str) else layer.activation.value
@@ -103,7 +103,6 @@ def moe_apply(
                         1] == 0
                     subc_quant_w2_sz = intermediate_size // weights.w2_weight_scale.shape[
                         1]
-
                 actual_hidden_size = x.shape[-1]
                 padding_size = weights.w13_weight.shape[-2] - actual_hidden_size
                 x = jnp.pad(x, ((0, 0), (0, padding_size)))
@@ -132,6 +131,8 @@ def moe_apply(
                     w2=weights.w2_weight,
                     w1_scale=weights.w13_weight_scale,
                     w2_scale=weights.w2_weight_scale,
+                    w1_zero_point=weights.w13_weight_zero_point,
+                    w2_zero_point=weights.w2_weight_zero_point,
                     w1_bias=weights.w13_bias,
                     w2_bias=weights.w2_bias,
                     gating_output=gating_output,
@@ -164,16 +165,13 @@ def moe_apply(
                     activation_ffw_td=layer.activation_ffw_td,
                     hidden_act=layer.hidden_act,
                     mesh=mesh)
-
             case MoEBackend.MEGABLX_GMM:
                 # NOTE: circular import avoidance
                 from tpu_inference.layers.jax.moe.sparse_moe import \
                     sparse_moe_func
-
                 return sparse_moe_func(weights=weights,
                                        x_TD=x,
                                        gating_output=gating_output,
                                        layer=layer,
                                        mesh=mesh)
-
         return output
