@@ -60,35 +60,17 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def _awq_unpack_int8_and_scale(
+def _awq_unpack_int8(
     qweight: jax.Array,
     qzeros: jax.Array,
-    scales: jax.Array,
     group_size: int,
-) -> tuple[jax.Array, jax.Array]:
-    """
-    Unpacks AWQ weights to int8 (centered) and returns them alongside bf16 scales.
-    Does NOT dequantize to bf16 to save memory.
-    """
-    w = awq_u32_unpack_u4(qweight)
-    z = awq_u32_unpack_u4(qzeros)
-
-    w = w.astype(jnp.int8)
-    z = z.astype(jnp.int8)
+) -> jax.Array:
+    w = awq_u32_unpack_u4(qweight).astype(jnp.int8)
+    z = awq_u32_unpack_u4(qzeros).astype(jnp.int8)
 
     E, in_feat, out_feat = w.shape
-    w = w.reshape(E, -1, group_size, out_feat)
-
-    z = jnp.expand_dims(z, 2)
-    w = w - z  # int8 centered weights
-
-    # Reshape w back to (E, in_feat, out_feat)
-    w = w.reshape(E, in_feat, out_feat)
-
-    # Scales are (E, in_feat // group_size, out_feat)
-    s = scales.astype(jnp.bfloat16)
-
-    return w, s
+    return (w.reshape(E, -1, group_size, out_feat) - z[:, :, None, :]).reshape(
+        E, in_feat, out_feat)
 
 
 def _awq_dequant_and_format_moe_weights(
@@ -104,10 +86,11 @@ def _awq_dequant_and_format_moe_weights(
     w13_reorder_size: int,
     mesh: Mesh,
 ) -> FusedMoEWeights:
-    # Unpack to int8 and get bf16 scales, but do NOT multiply yet
-    w13, w13_scale = _awq_unpack_int8_and_scale(w13_qw, w13_qz, w13_s,
-                                                group_size)
-    w2, w2_scale = _awq_unpack_int8_and_scale(w2_qw, w2_qz, w2_s, group_size)
+    w13 = _awq_unpack_int8(w13_qw, w13_qz, group_size)
+    w13_scale = w13_s.astype(jnp.bfloat16)
+
+    w2 = _awq_unpack_int8(w2_qw, w2_qz, group_size)
+    w2_scale = w2_s.astype(jnp.bfloat16)
 
     E = w13.shape[0]
     H = w13.shape[1]
@@ -569,20 +552,13 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        (w13_qw, w13_qz, w13_s, w2_qw, w2_qz,
-         w2_s) = jax.lax.optimization_barrier(
-             (jax_view(layer.w13_qweight),
-              jax_view(layer.w13_qzeros), jax_view(layer.w13_scales),
-              jax_view(layer.w2_qweight), jax_view(layer.w2_qzeros),
-              jax_view(layer.w2_scales)))
-
         weights = _awq_dequant_and_format_moe_weights(
-            w13_qw,
-            w13_qz,
-            w13_s,
-            w2_qw,
-            w2_qz,
-            w2_s,
+            w13_qw=jax_view(layer.w13_qweight),
+            w13_qz=jax_view(layer.w13_qzeros),
+            w13_s=jax_view(layer.w13_scales),
+            w2_qw=jax_view(layer.w2_qweight),
+            w2_qz=jax_view(layer.w2_qzeros),
+            w2_s=jax_view(layer.w2_scales),
             group_size=self.quant_config.group_size,
             moe_backend=self.moe_backend,
             w13_interleave=self._w13_interleave,
