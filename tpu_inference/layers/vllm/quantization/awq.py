@@ -38,14 +38,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import \
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
-from tpu_inference.layers.common.process_weights.moe_weights import \
-    FusedMoEWeights
+from tpu_inference.layers.common.process_weights.moe_weights import (
+    FusedMoEWeights, process_moe_weights)
 from tpu_inference.layers.common.quant_methods import AWQ
 from tpu_inference.layers.common.quantization import awq_u32_unpack_u4
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.common.utils import (
-    reorder_concatenated_tensor_for_sharding,
-    slice_sharded_tensor_for_concatenation)
+from tpu_inference.layers.common.utils import \
+    slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.moe import (
     MoEBackend, select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.quantization.configs import (
@@ -53,7 +52,7 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import align_to, get_mesh_shape_product
+from tpu_inference.utils import get_mesh_shape_product
 
 P = PartitionSpec
 
@@ -87,118 +86,21 @@ def _awq_dequant_and_format_moe_weights(
     mesh: Mesh,
 ) -> FusedMoEWeights:
     w13 = _awq_unpack_int8(w13_qw, w13_qz, group_size)
-    w13_scale = w13_s.astype(jnp.bfloat16)
-
     w2 = _awq_unpack_int8(w2_qw, w2_qz, group_size)
-    w2_scale = w2_s.astype(jnp.bfloat16)
 
-    E = w13.shape[0]
-    H = w13.shape[1]
-    two_I = w13.shape[2]
-    I = two_I // 2
-
-    if w13_interleave:
-        # Interleave weights (int8)
-        w1 = w13[:, :, ::2]
-        w3 = w13[:, :, 1::2]
-        w13 = jnp.concatenate([w1, w3], axis=2)
-
-        # Interleave scales (bf16)
-        # Scales shape: (E, H//G, 2*I)
-        w1_s = w13_scale[:, :, ::2]
-        w3_s = w13_scale[:, :, 1::2]
-        w13_scale = jnp.concatenate([w1_s, w3_s], axis=2)
-
-    match moe_backend:
-        case MoEBackend.FUSED_MOE:
-            # Process Weights (int8)
-            # ----------------------
-            w13 = w13.reshape(E, H, 2, I)
-            w13 = jnp.swapaxes(w13, 1, 2)  # (E, 2, H, I)
-
-            pad_H = align_to(H, 256) - H
-            pad_I = align_to(I, 256) - I
-
-            if pad_H > 0 or pad_I > 0:
-                w13 = jnp.pad(w13, ((0, 0), (0, 0), (0, pad_H), (0, pad_I)))
-                w2 = jnp.pad(w2, ((0, 0), (0, pad_I), (0, pad_H)))
-
-            # Process Scales (bf16)
-            # ---------------------
-            # w13_scale expected shape for kernel: (E, 2, H_blocks, 1, I)
-            # Current w13_scale: (E, H_blocks, 2*I)
-            H_blocks = w13_scale.shape[1]
-            w13_scale = w13_scale.reshape(E, H_blocks, 2, I)
-            w13_scale = jnp.swapaxes(w13_scale, 1, 2)  # (E, 2, H_blocks, I)
-            w13_scale = jnp.expand_dims(w13_scale, 3)  # (E, 2, H_blocks, 1, I)
-
-            # w2_scale expected shape for kernel: (E, I_blocks, 1, H)
-            # Current w2_scale: (E, I_blocks, H)
-            w2_scale = jnp.expand_dims(w2_scale, 2)  # (E, I_blocks, 1, H)
-
-            # Pad scales if necessary
-            pad_H_blocks = pad_H // group_size
-            if pad_H > 0 or pad_I > 0:
-                w13_scale = jnp.pad(w13_scale,
-                                    ((0, 0), (0, 0), (0, pad_H_blocks), (0, 0),
-                                     (0, pad_I)))
-
-                pad_I_blocks = pad_I // group_size
-                w2_scale = jnp.pad(w2_scale, ((0, 0), (0, pad_I_blocks),
-                                              (0, 0), (0, pad_H)))
-
-        case MoEBackend.GMM_EP:
-            # For GMM kernels, we generally expect 4D scales: (E, Blocks, 1, Dim)
-            # w13_scale: (E, H//G, 2*I) -> (E, H//G, 1, 2*I)
-            w13_scale = jnp.expand_dims(w13_scale, 2)
-            # w2_scale: (E, I//G, H) -> (E, I//G, 1, H)
-            w2_scale = jnp.expand_dims(w2_scale, 2)
-
-        case MoEBackend.GMM_TP:
-            output_sizes = [I, I]
-            # Reorder Weights
-            w13 = reorder_concatenated_tensor_for_sharding(w13,
-                                                           output_sizes,
-                                                           w13_reorder_size,
-                                                           dim=2)
-            # Reorder Scales (dim 2 is features/output)
-            w13_scale = reorder_concatenated_tensor_for_sharding(
-                w13_scale, output_sizes, w13_reorder_size, dim=2)
-
-            # Expand scales to 4D for GMM kernel: (E, Blocks, 1, Dim)
-            w13_scale = jnp.expand_dims(w13_scale, 2)
-            w2_scale = jnp.expand_dims(w2_scale, 2)
-
-            # Sharding Constraints
-            w13 = jax.lax.with_sharding_constraint(
-                w13,
-                NamedSharding(mesh, P(None, None,
-                                      ShardingAxisName.MLP_TENSOR)))
-            w2 = jax.lax.with_sharding_constraint(
-                w2,
-                NamedSharding(mesh, P(None, ShardingAxisName.MLP_TENSOR,
-                                      None)))
-
-            # Scales sharding constraints (aligned with weights)
-            w13_scale = jax.lax.with_sharding_constraint(
-                w13_scale,
-                NamedSharding(mesh,
-                              P(None, None, None,
-                                ShardingAxisName.MLP_TENSOR)))
-
-            w2_scale = jax.lax.with_sharding_constraint(
-                w2_scale,
-                NamedSharding(mesh,
-                              P(None, ShardingAxisName.MLP_TENSOR, None,
-                                None)))
-
-    return FusedMoEWeights(
-        w13_weight=w13,
-        w13_weight_scale=w13_scale,
-        w13_bias=None,
-        w2_weight=w2,
-        w2_weight_scale=w2_scale,
-        w2_bias=None,
+    return process_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13,
+            w13_weight_scale=w13_s.astype(jnp.bfloat16),
+            w13_bias=None,
+            w2_weight=w2,
+            w2_weight_scale=w2_s.astype(jnp.bfloat16),
+            w2_bias=None,
+        ),
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+        transposed=True,
     )
 
 

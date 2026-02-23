@@ -130,6 +130,7 @@ def process_moe_weights(
     moe_backend: MoEBackend,
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
+    transposed: bool = False,
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -143,6 +144,9 @@ def process_moe_weights(
         w13_interleave: used when loaded w13_weight is stored in interleaved
             pattern where even index element is w1 and odd index element is w3.
             we uninterleave so that first half is w1 and second half is w3.
+        transposed: if True, weights are already in (E, contracting,
+            non_contracting) layout (e.g. AWQ's is_transposed=True format),
+            so the internal transpose is skipped.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -155,39 +159,53 @@ def process_moe_weights(
     w2_weight_scale = weights.w2_weight_scale
     w2_bias = weights.w2_bias
 
-    num_experts, hidden_size, intermediate_size = w2_weight.shape
+    if transposed:
+        num_experts, intermediate_size, hidden_size = w2_weight.shape
+    else:
+        num_experts, hidden_size, intermediate_size = w2_weight.shape
 
     if w13_interleave:
-        w1_weight = w13_weight[:, ::2, :]
-        w3_weight = w13_weight[:, 1::2, :]
-        w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
-
-        if w13_weight_scale is not None:
-            w1_weight_scale = w13_weight_scale[:, ::2, :]
-            w3_weight_scale = w13_weight_scale[:, 1::2, :]
-            w13_weight_scale = jnp.concat([w1_weight_scale, w3_weight_scale],
-                                          axis=1)
-
+        if transposed:
+            w1_weight = w13_weight[:, :, ::2]
+            w3_weight = w13_weight[:, :, 1::2]
+            w13_weight = jnp.concat([w1_weight, w3_weight], axis=2)
+            if w13_weight_scale is not None:
+                w1_weight_scale = w13_weight_scale[:, :, ::2]
+                w3_weight_scale = w13_weight_scale[:, :, 1::2]
+                w13_weight_scale = jnp.concat(
+                    [w1_weight_scale, w3_weight_scale], axis=2)
+        else:
+            w1_weight = w13_weight[:, ::2, :]
+            w3_weight = w13_weight[:, 1::2, :]
+            w13_weight = jnp.concat([w1_weight, w3_weight], axis=1)
+            if w13_weight_scale is not None:
+                w1_weight_scale = w13_weight_scale[:, ::2, :]
+                w3_weight_scale = w13_weight_scale[:, 1::2, :]
+                w13_weight_scale = jnp.concat(
+                    [w1_weight_scale, w3_weight_scale], axis=1)
         if w13_bias is not None:
             w1_bias = w13_bias[:, ::2]
             w3_bias = w13_bias[:, 1::2]
             w13_bias = jnp.concat([w1_bias, w3_bias], axis=1)
 
-    # Transpose non-constracting dim to right most dim
-    w13_weight = jnp.swapaxes(w13_weight, 1, 2)
-    w2_weight = jnp.swapaxes(w2_weight, 1, 2)
+    if not transposed:
+        # Transpose non-contracting dim to rightmost dim.
+        w13_weight = jnp.swapaxes(w13_weight, 1, 2)
+        w2_weight = jnp.swapaxes(w2_weight, 1, 2)
 
-    # Workaround for JAX error "must have valid byte strides"
-    w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
-    w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
+        # Workaround for JAX error "must have valid byte strides"
+        w13_weight = with_layout_constraint(w13_weight, Layout((0, 1, 2)))
+        w2_weight = with_layout_constraint(w2_weight, Layout((0, 1, 2)))
 
     if w13_weight_scale is not None:
         w13_weight_scale = w13_weight_scale.astype(jnp.float32)
-        w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
+        if not transposed:
+            w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
     if w2_weight_scale is not None:
         w2_weight_scale = w2_weight_scale.astype(jnp.float32)
-        w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
+        if not transposed:
+            w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
     if w13_bias is not None:
         w13_bias = w13_bias.astype(jnp.float32)
