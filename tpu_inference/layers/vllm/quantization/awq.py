@@ -59,67 +59,6 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
-def _awq_unpack_and_format_moe_weights(
-    w13_qw: jax.Array,
-    w13_qz: jax.Array,
-    w13_s: jax.Array,
-    w2_qw: jax.Array,
-    w2_qz: jax.Array,
-    w2_s: jax.Array,
-    group_size: int,
-    moe_backend: MoEBackend,
-    w13_interleave: bool,
-    w13_reorder_size: int,
-    mesh: Mesh,
-) -> FusedMoEWeights:
-    """Unpack AWQ int4 MoE weights and format for the target backend.
-
-    Unlike the previous _awq_dequant_and_format_moe_weights, this does NOT
-    subtract zero points from the weights. The int8 weights and int8 zero
-    points are kept separate so that the GMM kernel can perform the
-    subtraction per tile, avoiding materialisation of a full dequantized
-    tensor in HBM.
-
-    Args:
-        w13_qw: Packed int32 gate+up weights  (E, hidden, 2*inter // pack).
-        w13_qz: Packed int32 gate+up zeros    (E, groups, 2*inter // pack).
-        w13_s:  Gate+up scales                 (E, groups, 2*inter).
-        w2_qw:  Packed int32 down weights      (E, inter, hidden // pack).
-        w2_qz:  Packed int32 down zeros        (E, groups, hidden // pack).
-        w2_s:   Down scales                    (E, groups, hidden).
-        group_size: AWQ quantisation group size.
-        moe_backend: Target MoE backend.
-        w13_interleave: Whether w13 is stored interleaved.
-        w13_reorder_size: Reorder chunk count for GMM_TP.
-        mesh: Device mesh.
-
-    Returns:
-        FusedMoEWeights with int8 weights, bf16 scales, int8 zero points,
-        and None biases, formatted for the chosen backend.
-    """
-    w13 = awq_u32_unpack_u4(w13_qw)
-    w13_zp = awq_u32_unpack_u4(w13_qz)
-    w2 = awq_u32_unpack_u4(w2_qw)
-    w2_zp = awq_u32_unpack_u4(w2_qz)
-
-    return process_moe_weights(
-        FusedMoEWeights(
-            w13_weight=w13,
-            w13_weight_scale=w13_s,
-            w13_weight_zero_point=w13_zp,
-            w13_bias=None,
-            w2_weight=w2,
-            w2_weight_scale=w2_s,
-            w2_weight_zero_point=w2_zp,
-            w2_bias=None,
-        ),
-        moe_backend=moe_backend,
-        w13_reorder_size=w13_reorder_size,
-        w13_interleave=w13_interleave,
-        transposed=True,
-    )
-
-
 @register_quantization_config(AWQ)
 class VllmAWQConfig(AWQConfig, VllmQuantConfig):
 
@@ -432,18 +371,21 @@ class VllmAWQMoEMethod(FusedMoEMethodBase):
         w2_qzeros = t2j(layer.w2_qzeros, use_dlpack=False)
         delattr(layer, "w2_qzeros")
 
-        weights = _awq_unpack_and_format_moe_weights(
-            w13_qw=w13_qweight,
-            w13_qz=w13_qzeros,
-            w13_s=w13_scales,
-            w2_qw=w2_qweight,
-            w2_qz=w2_qzeros,
-            w2_s=w2_scales,
-            group_size=self.quant_config.group_size,
+        weights = process_moe_weights(
+            FusedMoEWeights(
+                w13_weight=awq_u32_unpack_u4(w13_qweight),
+                w13_weight_scale=w13_scales,
+                w13_weight_zero_point=awq_u32_unpack_u4(w13_qzeros),
+                w13_bias=None,
+                w2_weight=awq_u32_unpack_u4(w2_qweight),
+                w2_weight_scale=w2_scales,
+                w2_weight_zero_point=awq_u32_unpack_u4(w2_qzeros),
+                w2_bias=None,
+            ),
             moe_backend=self.moe_backend,
             w13_interleave=self._w13_interleave,
             w13_reorder_size=self._w13_reorder_size,
-            mesh=self.mesh,
+            transposed=True,
         )
 
         weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
